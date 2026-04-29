@@ -281,14 +281,13 @@ def run():
         machine.reset()
 
 
-# UIFlow's App List invokes user apps by running the file, not by
-# calling run(). Guard with __name__ so importing this module for
-# tests/inspection doesn't immediately spin up BLE.
-if __name__ == "__main__":
-    run()
-else:
-    # When the launcher imports us (vs. runs us as __main__), call run()
-    # explicitly. UIFlow 2.4.x has been observed to do both depending on
-    # how the app was selected; calling run() from here is idempotent
-    # because run() itself is the only place that wires BLE up.
-    run()
+# UIFlow 2.4.x's App List has been observed to invoke apps both as
+# __main__ (file run directly) and via import (when picked through
+# the menu vs. the file system, depending on version). The previous
+# if/else with both arms calling run() was just dispatching to
+# itself; collapse it so the empirical behavior is the documented
+# behavior. The trade-off is that anyone who imports this module
+# from CPython for inspection will trigger a BLE init — but the
+# imports above (M5, hardware, bluetooth) already only resolve
+# on-device, so that path isn't a real use case.
+run()

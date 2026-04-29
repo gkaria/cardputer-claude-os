@@ -359,11 +359,9 @@ def main():
         time.sleep_ms(40)
 
 
-# Run on import — UIFlow's boot.py invokes us by running this file
-# (not by calling a function), so a bare main() at module scope is
-# the right pattern here. Guard with __name__ just in case someone
-# imports this module for introspection.
-if __name__ == "__main__":
-    main()
-else:
-    main()
+# UIFlow's boot.py invokes us by running this file rather than
+# calling a function. The previous if/else with both arms calling
+# main() was self-cancelling — the comment claimed the guard
+# protected against import-time auto-run, but the else branch
+# defeated that. Run bare; that's what we actually want.
+main()
