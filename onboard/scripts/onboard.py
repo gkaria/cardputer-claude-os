@@ -483,10 +483,55 @@ def _wait_for_any_usbmodem(current_port: str, timeout: float = 20.0) -> str | No
 # first, run pip if the user agrees, and only then import the rest of the
 # pipeline.
 
+# Minimum esptool version we need. flash.py invokes esptool with
+# `--after watchdog_reset`, which was added in esptool 4.8. Older
+# esptool fails mid-flash with an opaque argparse error AFTER the
+# button dance, which is the worst possible time. Bumped to 4.8 as
+# the floor; requirements.txt pins >= 4.11 for the version we test
+# against.
+_MIN_ESPTOOL = (4, 8)
+
+
 def _pyserial_present() -> bool:
     # find_spec doesn't execute the package, so it's safe even if pyserial
     # has broken init — we only care whether it's importable at all.
     return importlib.util.find_spec("serial") is not None
+
+
+def _esptool_version() -> tuple[int, ...] | None:
+    """Return (major, minor, ...) tuple if esptool is importable; None otherwise.
+
+    Tolerates non-numeric suffixes (e.g. ``4.8.0.dev0``) by stopping at
+    the first non-digit in each component. Used by the preflight to
+    detect installs that are too old to support the esptool flags
+    flash.py uses.
+    """
+    try:
+        import esptool  # noqa: F401
+    except Exception:
+        # Importing esptool runs its top-level code, which can fail in
+        # weird ways on broken installs (missing transitive deps, etc).
+        # Treat any import failure as "version unknown" rather than
+        # crashing here.
+        return None
+    raw = getattr(esptool, "__version__", "")
+    parts: list[int] = []
+    for piece in raw.split(".")[:3]:
+        digits = ""
+        for ch in piece:
+            if ch.isdigit():
+                digits += ch
+            else:
+                break
+        if not digits:
+            break
+        parts.append(int(digits))
+    return tuple(parts) if parts else None
+
+
+def _esptool_version_str() -> str:
+    v = _esptool_version()
+    return ".".join(str(x) for x in v) if v else "unknown"
 
 
 def _esptool_path_candidates() -> list[str]:
@@ -535,60 +580,152 @@ def _esptool_present() -> bool:
     return any(os.path.isfile(p) for p in _esptool_path_candidates())
 
 
-def _preflight() -> None:
-    """Ensure pyserial + esptool are importable; install via pip only
-    if the bundled vendor/ is missing AND the user's environment also
-    doesn't have them.
+def _check_port_access(port: str) -> None:
+    """On Linux, refuse to continue with an inaccessible port and
+    surface the specific group the user is missing from.
 
-    The goal is "clone the skill and go" — minimal install steps.
-    pyserial ships in ``scripts/vendor/`` (BSD-3-Clause, vendored to
-    avoid even the one pip step on a fresh machine). esptool is
-    GPLv2+ and intentionally NOT vendored; it comes from pip on
-    first run if it isn't already in the user's environment, which
-    is what the prompt below handles.
+    Without this, port-open fails ~30 seconds later as a generic
+    ``PermissionError: [Errno 13]`` deep inside pyserial — opaque
+    enough that it sends new attendees down a 20-minute "is the
+    cable bad?" detour. The fix is documented in SKILL.md, but a
+    programmatic check forces it into the user's first 5 seconds
+    of output.
 
-    If somebody pruned ``vendor/`` (downloaded a zip without it, ran
-    a shallow clone that excluded it, deliberately trimmed to reduce
-    repo size) we also fall back to pip-installing pyserial.
+    No-op on macOS and Windows: there's no equivalent group-gate
+    on those platforms, and the path checks below would false-
+    positive for COMx which doesn't show up in the filesystem.
     """
-    # Both deps importable + vendor present → log honestly about where
-    # each came from and proceed. The previous message claimed both
-    # came from vendor/, which has been false since we unbundled
-    # esptool to keep the repo cleanly Apache-2.0.
-    if vendor_path.is_available() and _pyserial_present() and _esptool_present():
-        # esptool may or may not be in the user env vs. some other
-        # source; the only thing we know for sure is that find_spec
-        # resolved it. Don't claim it came from vendor/ specifically.
+    if sys.platform != "linux":
+        return
+    if not port or not os.path.exists(port):
+        # pick_port handles "no port found" already; if we got here
+        # with a missing path, defer to the next stage's error.
+        return
+    if os.access(port, os.R_OK | os.W_OK):
+        return
+    # Resolve the group name that owns the device node so the fix
+    # we suggest is specific to the user's distro (dialout on
+    # Debian/Ubuntu/Arch, uucp on Fedora/RHEL).
+    grp_name = "dialout"
+    try:
+        import grp
+        gid = os.stat(port).st_gid
+        grp_name = grp.getgrgid(gid).gr_name
+    except Exception:
+        pass
+    sys.stderr.write(
+        "\nERROR: cannot read/write {port}.\n"
+        "On Linux this means you're not in the '{grp}' group.\n"
+        "Fix once, long-term:\n"
+        "  sudo usermod -aG {grp} $USER\n"
+        "  # then log out and log back in (group changes take effect\n"
+        "  # for new sessions only — a new terminal is not enough)\n"
+        "Or as a one-off, prefix this command with sudo. The skill\n"
+        "doesn't need root for anything else, so the group fix is\n"
+        "strictly better.\n".format(port=port, grp=grp_name)
+    )
+    sys.exit(2)
+
+
+def _requirements_path() -> str:
+    """Absolute path to the repo-root requirements.txt.
+
+    Two levels up from this file: ``onboard/scripts/onboard.py`` →
+    ``onboard/`` → repo root. Stable across the canonical
+    ``~/Downloads/m5stack/`` and any clone-elsewhere setup.
+    """
+    return os.path.normpath(
+        os.path.join(os.path.dirname(__file__), "..", "..", "requirements.txt")
+    )
+
+
+def _preflight() -> None:
+    """Ensure pyserial + esptool are importable AND esptool is recent enough;
+    install via pip from requirements.txt if anything is missing or stale.
+
+    Three failure modes we explicitly guard against, all surfaced
+    early so a user doesn't blow time on the button dance just to
+    fail mid-flash:
+
+      1. esptool not importable → install (after y/n prompt).
+      2. esptool too old (< _MIN_ESPTOOL) → upgrade. flash.py uses
+         ``--after watchdog_reset`` (esptool 4.8+); a 4.7.0 install
+         would silently get past this preflight under the old
+         "importable means OK" check, then fail mid-FLASH with an
+         opaque argparse error.
+      3. Post-install re-verification: after pip runs, we check
+         again that esptool is the right version. Catches the
+         Ubuntu 22.04 trap where a too-old pip silently resolves
+         back to 4.7.0 because it can't fetch newer sdists.
+
+    pyserial is vendored under ``scripts/vendor/`` (BSD-3-Clause);
+    esptool is GPLv2+ and pip-installed on first run.
+    """
+    pyserial_ok = _pyserial_present()
+    esp_ver = _esptool_version()
+    esp_ok = esp_ver is not None and esp_ver >= _MIN_ESPTOOL
+
+    # Happy path: everything resolves and is recent enough.
+    if pyserial_ok and esp_ok:
         sys.stderr.write(
-            "Deps OK: pyserial from scripts/vendor/, esptool from "
-            "user/system site-packages.\n"
+            "Deps OK: pyserial from scripts/vendor/, "
+            "esptool {} from user/system site-packages.\n".format(
+                _esptool_version_str()
+            )
         )
         return
 
+    # Build a human-readable list of what's missing or stale, plus
+    # the matching pip-install spec list (for the manual-install
+    # hint when we can't prompt).
     missing: list[str] = []
-    if not _pyserial_present():
-        missing.append("pyserial")
-    if not _esptool_present():
-        missing.append("esptool")
-    if not missing:
-        return
+    install_spec: list[str] = []
+    if not pyserial_ok:
+        missing.append("pyserial (not importable)")
+        install_spec.append("pyserial")
+    if esp_ver is None:
+        missing.append("esptool (not importable)")
+        install_spec.append("esptool>={}.{}".format(*_MIN_ESPTOOL))
+    elif not esp_ok:
+        missing.append(
+            "esptool {} (need >= {}.{})".format(
+                _esptool_version_str(), *_MIN_ESPTOOL
+            )
+        )
+        install_spec.append("esptool>={}.{}".format(*_MIN_ESPTOOL))
 
-    sys.stderr.write(
-        "Missing Python dependencies: {}\n".format(", ".join(missing))
-    )
+    sys.stderr.write("Missing or stale Python dependencies:\n")
+    for m in missing:
+        sys.stderr.write("  - {}\n".format(m))
+
+    # Inside a venv, ``--user`` would install outside the venv and
+    # wouldn't be importable by this process.
+    in_venv = sys.prefix != getattr(sys, "base_prefix", sys.prefix)
+
+    # Prefer ``-r requirements.txt`` so the repo's version pins flow
+    # through. Fall back to per-package specs if the file is missing
+    # (someone trimmed the repo).
+    req = _requirements_path()
+    cmd_base = [sys.executable, "-m", "pip", "install"]
+    if not in_venv:
+        cmd_base.append("--user")
+    if os.path.isfile(req):
+        cmd = cmd_base + ["-r", req]
+        why = "via {}".format(req)
+    else:
+        cmd = cmd_base + install_spec
+        why = "as fallback (requirements.txt missing)"
 
     # Non-interactive callers (CI, scripts redirecting stdin) shouldn't
     # hang on input(). Bail with a clear manual-install hint instead.
     if not sys.stdin.isatty():
         sys.stderr.write(
             "stdin is not a tty; can't prompt interactively. Install with:\n"
-            "  {} -m pip install --user {}\n".format(
-                sys.executable, " ".join(missing)
-            )
+            "  {}\n".format(" ".join(cmd))
         )
         sys.exit(2)
 
-    prompt = "Install {} now with pip? [Y/n] ".format(", ".join(missing))
+    prompt = "Install/upgrade now with pip ({})? [Y/n] ".format(why)
     try:
         answer = input(prompt).strip().lower()
     except EOFError:
@@ -596,21 +733,10 @@ def _preflight() -> None:
         sys.exit(2)
     if answer in ("n", "no"):
         sys.stderr.write(
-            "Aborted. Install manually and re-run:\n"
-            "  {} -m pip install --user {}\n".format(
-                sys.executable, " ".join(missing)
-            )
+            "Aborted. Install manually and re-run:\n  {}\n".format(" ".join(cmd))
         )
         sys.exit(2)
 
-    # Inside a venv, `--user` would install outside the venv and wouldn't
-    # be importable by this process. Skip the flag there. (PEP 405: in a
-    # venv, sys.prefix diverges from sys.base_prefix.)
-    in_venv = sys.prefix != getattr(sys, "base_prefix", sys.prefix)
-    cmd = [sys.executable, "-m", "pip", "install"]
-    if not in_venv:
-        cmd.append("--user")
-    cmd.extend(missing)
     sys.stderr.write("Running: {}\n".format(" ".join(cmd)))
     try:
         subprocess.check_call(cmd)
@@ -621,6 +747,44 @@ def _preflight() -> None:
             )
         )
         sys.exit(2)
+
+    # Post-install re-verification. importlib caches negative results
+    # for the lifetime of the interpreter, so we have to invalidate
+    # before retrying find_spec / re-importing esptool.
+    importlib.invalidate_caches()
+    try:
+        # Drop any cached esptool module so the next import sees the
+        # newly-installed copy. Safe even if esptool was never
+        # imported in this process.
+        sys.modules.pop("esptool", None)
+    except Exception:
+        pass
+
+    if not _pyserial_present():
+        sys.stderr.write(
+            "After pip install, pyserial is still not importable. "
+            "Something is wrong with your Python environment.\n"
+        )
+        sys.exit(2)
+    new_ver = _esptool_version()
+    if new_ver is None or new_ver < _MIN_ESPTOOL:
+        sys.stderr.write(
+            "After pip install, esptool is {} but we need >= {}.{}.\n"
+            "This usually means your pip is too old to fetch newer\n"
+            "esptool releases (Ubuntu 22.04 ships a pip with this bug).\n"
+            "Try upgrading pip first:\n"
+            "  {} -m pip install --user --upgrade pip\n"
+            "then re-run this command.\n".format(
+                _esptool_version_str(),
+                _MIN_ESPTOOL[0],
+                _MIN_ESPTOOL[1],
+                sys.executable,
+            )
+        )
+        sys.exit(2)
+    sys.stderr.write(
+        "Deps installed: esptool {}.\n".format(_esptool_version_str())
+    )
 
     # pip wrote new files into site-packages / user scripts dir. Clear
     # the import system's finder cache so the re-check picks them up
@@ -741,6 +905,11 @@ def main() -> int:
     banner("DETECT")
     with Heartbeat("DETECT"):
         port = detect.pick_port(args.port)
+        # Surface dialout/group permission issues now, before the
+        # esptool probe (which would fail with a less-specific
+        # PermissionError) and well before the user invests time in
+        # the button dance.
+        _check_port_access(port)
         native = _is_native_usb(port)
         if native:
             # Skip esptool probe on native USB: the DTR/RTS reset it uses to
