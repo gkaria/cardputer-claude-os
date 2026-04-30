@@ -23,6 +23,7 @@ import importlib.util
 import os
 import shutil
 import subprocess
+import random
 import sys
 import threading
 import time
@@ -84,15 +85,86 @@ def banner(msg: str) -> None:
     sys.stderr.flush()
 
 
+# Per-stage flavor for the every-15-seconds heartbeat. Each pool is
+# shuffled once per Heartbeat instance and walked in order, so within
+# a run you don't see the same quip twice until the pool is exhausted.
+# Across runs the order differs. Lines are written to be whimsical
+# but anchored to what's actually happening on the wire — never
+# misleading about success or failure, since the Heartbeat thread is
+# only alive while the stage is making forward progress.
+_HEARTBEAT_QUIPS: dict[str, tuple[str, ...]] = {
+    "DETECT": (
+        "Asking the OS what's plugged in.",
+        "Filtering USB-UART bridges and native-USB ESP32-S3 devices.",
+        "Probing the chip identity over esptool.",
+        "Looking for a friendly silicon face on the bus.",
+    ),
+    "FETCH FIRMWARE": (
+        "Pulling firmware from M5Stack's CDN.",
+        "Bytes are arriving from across the Pacific.",
+        "Streaming the binary, hashing as we go. Nothing slips past the MD5.",
+        "Aliyun OSS is shipping firmware, one packet at a time.",
+        "Caching to ~/.cache/m5-onboard/ so the next run is faster.",
+        "Verifying Content-MD5 in flight; corrupt bytes don't make the cut.",
+    ),
+    "FLASH": (
+        "Whispering UIFlow into the chip's silicon ear.",
+        "Bytes are arriving. Bytes are settling in. None are going home.",
+        "The ROM bootloader is being agreeable, sector by sector.",
+        "Erasing the past. Writing the future. Don't unplug the time machine.",
+        "Painting fresh firmware over the old. The chip is patient.",
+        "Negotiating with flash storage. It signs every page in triplicate.",
+        "ESP32-S3 is reading its new instruction manual, one chapter at a time.",
+        "The chip and esptool are performing a careful, rehearsed dance.",
+        "Sectors are being prepared with the dignity of a librarian.",
+        "115200 baud, no stub. Slow and steady. The hare lost this race.",
+    ),
+    "RESTORE BOOT.PY": (
+        "Tucking the stock UIFlow boot.py into a safe drawer.",
+        "Backing up the original boot path before our launcher takes over.",
+        "Preserving the factory state. Just in case you change your mind.",
+        "Saving boot_uiflow.py — your escape hatch back to UIFlow.",
+    ),
+    "INSTALL APPS": (
+        "Beaming Python source through the REPL pipe, one file at a time.",
+        "MicroPython is filing its new apps with quiet enthusiasm.",
+        "Files are landing in /flash/ like paper airplanes in a gym.",
+        "Dictating Python to a very polite listener.",
+        "Each file gets its own little ceremony before the next.",
+        "Paste mode is the slowest courier with the cleanest handwriting.",
+        "Bytes over UART. The wire never complains.",
+        "Base64-decoded chunks are arriving at the device, in order.",
+        "Writing apps that the launcher will discover on next boot.",
+        "MicroPython is opening files and writing bytes. Small life, good life.",
+    ),
+}
+
+
+def _quips_for_stage(stage: str) -> list[str]:
+    """Return a copy of the matching pool, or [] if no prefix matches.
+
+    Match by prefix so labels with parenthetical suffixes — e.g.
+    "FETCH FIRMWARE (cardputer-adv)" or "FLASH (write)" — still
+    resolve to the right pool.
+    """
+    for prefix, lines in _HEARTBEAT_QUIPS.items():
+        if stage.startswith(prefix):
+            return list(lines)
+    return []
+
+
 class Heartbeat:
-    """Background thread that prints elapsed time for a stage every N seconds.
+    """Background thread that prints a stage-flavored "still alive" tick
+    every N seconds.
 
     Stages like FETCH FIRMWARE (network download), FLASH (esptool runs
     its own progress, but the post-flash wait and port re-enumeration
     can sit quiet for seconds), and the button-dance phases can go
     quiet long enough to look hung. A 15 s tick from a daemon thread
     gives a steady "still alive, here's where we are" signal without
-    touching the stage's own logic.
+    touching the stage's own logic. The line includes a whimsical
+    quip from the matching pool so 8 minutes of FLASH doesn't read
+    like a stuck process — see ``_HEARTBEAT_QUIPS``.
 
     Use as a context manager — the thread stops when the block exits,
     even on exception.
@@ -104,11 +176,35 @@ class Heartbeat:
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._start = 0.0
+        # Shuffle the matching quip pool once per instance so the
+        # tick-by-tick sequence is round-robin (no immediate repeats)
+        # but unpredictable across runs.
+        self._quips = _quips_for_stage(stage)
+        random.shuffle(self._quips)
+        self._quip_idx = 0
+
+    def _next_quip(self) -> str:
+        if not self._quips:
+            return ""
+        q = self._quips[self._quip_idx % len(self._quips)]
+        self._quip_idx += 1
+        return q
 
     def _run(self) -> None:
         while not self._stop.wait(self.interval):
             elapsed = int(time.monotonic() - self._start)
-            sys.stderr.write(f"  [heartbeat] {self.stage} — {elapsed}s elapsed\n")
+            quip = self._next_quip()
+            if quip:
+                sys.stderr.write(
+                    f"  [heartbeat {self.stage} {elapsed}s] {quip}\n"
+                )
+            else:
+                # Stages without a matching pool (future additions, custom
+                # callers) keep the old plain-text format so monitoring
+                # filters that only look for "[heartbeat" still match.
+                sys.stderr.write(
+                    f"  [heartbeat] {self.stage} — {elapsed}s elapsed\n"
+                )
             sys.stderr.flush()
 
     def __enter__(self) -> "Heartbeat":
