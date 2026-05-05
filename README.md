@@ -29,7 +29,7 @@ Claude takes over from there.
 
 ### What happens next
 
-- **Firmware writes to the device** (~90 seconds)
+- **Firmware writes to the device** (~180 seconds)
 - **Apps push to the device** (~100 seconds)
 - **Device reboots** straight into the launcher — pick an app and go
 
@@ -75,7 +75,7 @@ To also drop the apps under `/flash/apps/`, walk that directory the
 same way and remove what you don't want.
 
 If you want a fresh UIFlow firmware on top, re-run `m5-onboard go`
-*without* `--apps`: the skill flashes UIFlow and stops, leaving the
+_without_ `--apps`: the skill flashes UIFlow and stops, leaving the
 filesystem alone. The previous `boot_uiflow.py`-rename procedure here
 referred to a backup that `install_apps.py` only creates when the
 bundle ships its own root `boot.py`; the buddy bundle doesn't, so
@@ -88,6 +88,7 @@ that backup never exists for these users.
 You need **Python 3.10+**, **git**, and **Claude Code** on your laptop. `pyserial` ships vendored inside `onboard/scripts/vendor/`. `esptool` is GPL-licensed and is **not** vendored — the skill auto-installs it via pip on first run if it isn't already in your environment, so the user-facing experience is still a single command. To pre-install explicitly: `python3 -m pip install --user -r requirements.txt`.
 
 Bootstrap if needed:
+
 - **macOS** — `python3` usually pre-installed; if not, `brew install python`
 - **Linux (Debian/Ubuntu)** — `sudo apt-get install -y python3 python3-pip git`
 - **Windows** — `winget install -e --id Python.Python.3.13` and `winget install -e --id Git.Git`

@@ -15,7 +15,7 @@ Two speed/protocol profiles are used depending on USB topology:
   renegotiation occasionally kills the CDC link mid-flash (observed as
   `Lost connection, retrying... Staying in bootloader.` around 2–5% in).
   --no-stub keeps one baud the whole time and is rock-solid, completing
-  an 8 MB flash in ~90 s.
+  an 8 MB flash in ~180 s.
 
 Callers pass `native=True` for ESP32-S3/C3 flows; the caller knows
 which kind of port it's talking to.
