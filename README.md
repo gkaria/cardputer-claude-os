@@ -1,12 +1,48 @@
-# m5stack
+# Cardputer Claude OS
 
-Flash a Cardputer-Adv and install the Claude Buddy apps in one command.
+A DIY "OS" bundle for the [M5Stack Cardputer](https://shop.m5stack.com/) —
+flash UIFlow firmware, install a launcher, and ship a tiny suite of apps
+that turn the Cardputer into a hand-held Claude device:
 
-## Quick start
+- **Claude Buddy** — pair the Cardputer with Claude Code over BLE; watch
+  agent runs, token spend, and queue depth from your pocket.
+- **Push to Claude** — hold SPACE to record a voice question, release to
+  send. Whisper transcribes, Claude Haiku 4.5 replies on the LCD, and a
+  per-device 24-hour memory keeps context across turns. Type-mode also
+  available for noisy rooms.
+- **Hello / Snake** — minimal example app + a snake game so the bundle
+  isn't all serious business.
+
+> **Forked from** [`moremas/build-with-claude`](https://github.com/moremas/build-with-claude).
+> This fork adds the `worker/` directory (a Cloudflare Worker that
+> handles voice STT + Claude chat with conversation memory) and the
+> `Push to Claude` device app that talks to it. Everything else
+> originates from upstream — credit and thanks to the original authors.
+
+## What's new in this fork
+
+| Addition                       | Where                                                                        | What it does                                                                                                                                          |
+| ------------------------------ | ---------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Cloudflare Worker relay**    | [`worker/`](worker/)                                                         | Auth-gated edge endpoint. Whisper for STT, Claude Haiku 4.5 for the reply, Workers KV for per-device conversation memory (last 8 messages, 24 h TTL). |
+| **Voice + chat app**           | [`buddy/device/apps/push_to_claude.py`](buddy/device/apps/push_to_claude.py) | On-device client. Streams WAV to the Worker as it records (flat RAM footprint), text-fallback mode, scrollable replies, `/reset` shortcut.            |
+| **Externalized device config** | [`buddy/device/apps/config.example.py`](buddy/device/apps/config.example.py) | Worker URL + device secret loaded from a gitignored `config.py` so secrets never enter the repo.                                                      |
+
+See [`worker/README.md`](worker/README.md) for the full Cloudflare deploy
+guide.
+
+## Buy a Cardputer
+
+The bundle targets the **M5Stack Cardputer-Adv** (the version with PDM
+mic + speaker, required for Push to Claude). Get one direct from
+[shop.m5stack.com](https://shop.m5stack.com/) — search "Cardputer".
+The original Cardputer (non-Adv) works for everything except the voice
+app.
+
+## Quick start — flash a Cardputer
 
 1. Clone this repo locally — anywhere is fine:
    ```bash
-   git clone <repo-url>
+   git clone https://github.com/dakshaymehta/cardputer-claude-os.git
    ```
    The skill auto-detects the buddy bundle relative to its own install location, so the clone path doesn't matter. `~/Downloads/m5stack/` and `~/Desktop/m5stack/` are also checked as conventional fallbacks.
 2. Plug the Cardputer into your laptop via USB-C
@@ -37,6 +73,27 @@ Done. Power the device on/off with the side switch.
 
 ---
 
+## Quick start — Push to Claude (voice + chat)
+
+The voice app needs a Cloudflare Worker you control. Roughly 10 minutes
+of one-time setup; after that every voice/text turn is a single tap.
+
+1. Deploy the Worker — follow [`worker/README.md`](worker/README.md). You'll end up with a Worker URL and a `DEVICE_SECRET` you generated.
+2. Point the device at it:
+   ```bash
+   cp buddy/device/apps/config.example.py buddy/device/apps/config.py
+   ```
+   Edit `config.py`, paste in your `WORKER_BASE` and `DEVICE_SECRET`.
+3. Push the apps to the Cardputer (no firmware re-flash needed):
+   ```bash
+   python3 .claude/skills/m5-onboard/scripts/install_apps.py --port <PORT> --src buddy
+   ```
+4. Boot the device → **Push to Claude** → tap SPACE.
+
+`config.py` is gitignored — your secret stays on your machine.
+
+---
+
 ## Using Claude Buddy (BLE)
 
 1. Power on the Cardputer
@@ -44,9 +101,15 @@ Done. Power the device on/off with the side switch.
 3. In Claude Desktop: **Help → Troubleshooting → Enable Developer Tools** (one-time, persists)
 4. Then **Developer menu → Hardware Buddy → Connect**
 
-## Event WiFi
+## WiFi auto-connect
 
-The bundled launcher auto-connects to the event WiFi (`cardputer` / `cardconnect`) on every boot and displays the result on screen — `Connected · IP: 192.168.x.x` on success, `WiFi: offline` on failure (the launcher always continues either way). The credentials are intentionally checked into [`buddy/device/wifi_event.py`](buddy/device/wifi_event.py); the AP is publicly broadcast at the venue and the password is the published handout, so this is not a leaked secret. To use this bundle outside the event, edit `wifi_event.py` (replace `SSID`/`PASSWORD`) or remove the `_connect_wifi_with_splash()` call near the top of `main()` to disable the auto-connect entirely.
+The launcher tries to bring up WiFi on every boot and shows the result
+on screen — `Connected · IP: 192.168.x.x` on success, `WiFi: offline`
+on failure (the launcher always continues either way). Out of the box
+the credentials in [`buddy/device/wifi_event.py`](buddy/device/wifi_event.py)
+are blank, so you'll see `WiFi: offline`. Edit that file to fill in
+your own SSID + password, or remove the `_connect_wifi_with_splash()`
+call near the top of `main()` to skip the auto-connect entirely.
 
 ## Adding your own app
 
@@ -76,16 +139,16 @@ same way and remove what you don't want.
 
 If you want a fresh UIFlow firmware on top, re-run `m5-onboard go`
 _without_ `--apps`: the skill flashes UIFlow and stops, leaving the
-filesystem alone. The previous `boot_uiflow.py`-rename procedure here
-referred to a backup that `install_apps.py` only creates when the
-bundle ships its own root `boot.py`; the buddy bundle doesn't, so
-that backup never exists for these users.
+filesystem alone.
 
 ---
 
 ## Prerequisites
 
 You need **Python 3.10+**, **git**, and **Claude Code** on your laptop. `pyserial` ships vendored inside `.claude/skills/m5-onboard/scripts/vendor/`. `esptool` is GPL-licensed and is **not** vendored — the skill auto-installs it via pip on first run if it isn't already in your environment, so the user-facing experience is still a single command. To pre-install explicitly: `python3 -m pip install --user -r requirements.txt`.
+
+For the Push-to-Claude Worker you also need **Node.js 18+** and a
+Cloudflare account; full instructions in [`worker/README.md`](worker/README.md).
 
 Bootstrap if needed:
 
@@ -106,17 +169,29 @@ export M5_BUDDY_DIR=/path/to/buddy/device
 - **Download-mode prompt keeps retrying** — you're releasing G0 too early. Release Reset first, keep holding G0 for about a second, then release.
 - **"No USB-UART bridge found" (older boards)** — install the CH9102 driver on Windows; on macOS/Linux, unplug and replug.
 - **Claude Buddy never connects over BLE** — make sure the buddy launcher (not UIFlow's) owns `/flash/main.py`. The skill handles this automatically on install.
+- **Push to Claude shows "Not configured"** — copy `config.example.py` to `config.py` and fill in `WORKER_BASE` + `DEVICE_SECRET`, then re-push the apps.
+- **Push to Claude returns "unauthorized"** — the `DEVICE_SECRET` in `config.py` doesn't match the one set on the Worker. Re-run `wrangler secret put DEVICE_SECRET` and update `config.py` to match.
 - **Something else feels broken** — run `python3 .claude/skills/m5-onboard/scripts/smoke_test.py --port <PORT>` for an I2C + LCD + speaker + button check.
 
 ## What's in this repo
 
 - **`.claude/skills/m5-onboard/`** — the Claude Code skill. Detect port, flash UIFlow, install apps. See [`.claude/skills/m5-onboard/SKILL.md`](.claude/skills/m5-onboard/SKILL.md) for the full playbook and every gotcha baked into the scripts.
 - **`buddy/`** — the MicroPython app bundle that gets installed. See [`buddy/README.md`](buddy/README.md) for device-side layout and iteration tooling.
+- **`worker/`** — the Cloudflare Worker that powers Push to Claude (voice + chat memory). See [`worker/README.md`](worker/README.md) for deploy instructions.
 
-The two are decoupled by design: the `m5-onboard` skill can install any bundle via `--apps <path>`; `buddy` is just what ships here.
+The three are decoupled by design: the `m5-onboard` skill can install any bundle via `--apps <path>`, `buddy` is just what ships here, and the worker is optional (only the Push-to-Claude app uses it).
+
+## Contributing
+
+PRs welcome — especially new launcher apps, new boards, and improvements
+to the onboarding flow. Open an issue first if you're planning anything
+non-trivial. The code is small and intentionally tries to stay readable
+end-to-end.
 
 ## License
 
 This project's own code is licensed under **Apache 2.0** — see [`LICENSE`](LICENSE) and [`NOTICE`](NOTICE).
 
 `pyserial` (BSD-3-Clause, Apache-compatible) is the only third-party package bundled in `.claude/skills/m5-onboard/scripts/vendor/`. `esptool` (GPLv2+) is intentionally not vendored; it's declared as a pip dependency in [`requirements.txt`](requirements.txt) so the repository itself stays cleanly Apache-2.0. See [`LICENSE-THIRD-PARTY.md`](LICENSE-THIRD-PARTY.md) for details.
+
+Forked from [`moremas/build-with-claude`](https://github.com/moremas/build-with-claude); upstream Apache-2.0 license preserved in `LICENSE` and `NOTICE`.

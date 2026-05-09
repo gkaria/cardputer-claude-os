@@ -6,3 +6,8 @@ __pycache__/
 .venv/
 venv/
 .env
+
+# Local secrets / per-device configuration
+buddy/device/apps/config.py
+worker/.dev.vars
+worker/.wrangler/

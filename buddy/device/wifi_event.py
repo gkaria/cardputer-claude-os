@@ -1,17 +1,12 @@
-"""Connect to the event WiFi network on boot.
+"""Optional WiFi auto-connect on boot.
 
-This module hardcodes the SSID and password for a SPECIFIC EVENT
-network. It is **not** a leaked credential — the AP is publicly
-broadcast at the venue, the password is the published handout, and
-the bundle ships with both baked in so attendees don't have to type
-anything to get on the network.
+Set ``SSID`` / ``PASSWORD`` below to your own network if you want
+the launcher to come up online (the Push-to-Claude voice/chat app
+needs WiFi). Leave them empty to skip the auto-connect — the
+launcher will display ``WiFi: offline`` and continue normally.
 
-The credentials below are intentionally part of the public repo for
-the event-bundle case. To use this bundle elsewhere:
-
-  - Replace ``SSID`` / ``PASSWORD`` with your own, OR
-  - Remove the ``wifi_event.connect_with_splash(...)`` call from
-    ``main.py`` to disable the auto-connect entirely.
+To disable the auto-connect entirely, remove the
+``wifi_event.connect_with_splash(...)`` call from ``main.py``.
 
 The module deliberately does NOT touch NVS. UIFlow's startup reads
 WiFi creds from NVS keys (``ssid0``, ``pswd0``, ``net_mode``,
@@ -21,10 +16,10 @@ boot path. Doing the connect in pure Python from our own ``main.py``
 is deterministic regardless of that.
 """
 
-# --- EVENT WIFI ---------------------------------------------------------
-# Public broadcast at the venue. Replace for use elsewhere.
-SSID = "cardputer"
-PASSWORD = "cardconnect"
+# --- WIFI CREDENTIALS ---------------------------------------------------
+# Fill in your own. Leave empty to skip the auto-connect.
+SSID = ""
+PASSWORD = ""
 # -----------------------------------------------------------------------
 
 # How long to wait for an IP before giving up. The venue network is
@@ -50,6 +45,14 @@ def connect(timeout_ms=CONNECT_TIMEOUT_MS):
     """
     import network
     import time
+
+    if not SSID:
+        return {
+            "ok": False,
+            "ssid": "",
+            "err": "no SSID configured (edit buddy/device/wifi_event.py)",
+            "elapsed_ms": 0,
+        }
 
     sta = network.WLAN(network.STA_IF)
     if not sta.active():
