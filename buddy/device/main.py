@@ -247,8 +247,10 @@ def _discover_apps():
         mod = fname[:-3]
         # Skip dunder / private files defensively — nothing in the
         # bundle today uses them, but a future .py dropped in for a
-        # helper shouldn't land in the visible menu.
-        if mod.startswith("_"):
+        # helper shouldn't land in the visible menu. Also skip
+        # ``config.py`` / ``config.example.py`` etc., which are
+        # imported by apps (Push to Claude) but aren't apps themselves.
+        if mod.startswith("_") or mod.startswith("config"):
             continue
         display = mod.replace("_", " ")
         out.append((display, mod))
