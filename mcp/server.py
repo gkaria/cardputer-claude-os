@@ -131,6 +131,14 @@ class Bridge:
         self._connect_lock = asyncio.Lock()
         self._hello_event = asyncio.Event()
 
+        # Serializes the chunked write of ONE message so two concurrent
+        # tool calls (now possible — many agents share one daemon) can't
+        # interleave their 20-byte fragments on the RX characteristic and
+        # corrupt the device's line reassembly. Scoped to the write loop
+        # only — NOT the blocking wait — so the device's own pre-emption
+        # (a confirm can pre-empt a pending ask) still works.
+        self._write_lock = asyncio.Lock()
+
         # Suppress reconnect storms when the device is plainly absent —
         # without this, every tool call eats 5 s of scan time before
         # returning "unavailable", which makes Claude wait forever
@@ -376,10 +384,11 @@ class Bridge:
 
         try:
             mtu = (self.hello or {}).get("mtu") or 20
-            for i in range(0, len(data), mtu):
-                await self.client.write_gatt_char(
-                    RX_UUID, data[i : i + mtu], response=False
-                )
+            async with self._write_lock:
+                for i in range(0, len(data), mtu):
+                    await self.client.write_gatt_char(
+                        RX_UUID, data[i : i + mtu], response=False
+                    )
         except (BleakError, OSError) as e:
             self._pending.pop(mid, None)
             return {"ack": cmd, "ok": False, "err": f"ble write failed: {e}"}
@@ -395,10 +404,11 @@ class Bridge:
                     json.dumps({"cmd": "cancel", "id": uuid.uuid4().hex[:8], "target_id": mid})
                     + "\n"
                 ).encode()
-                for i in range(0, len(cancel), mtu):
-                    await self.client.write_gatt_char(
-                        RX_UUID, cancel[i : i + mtu], response=False
-                    )
+                async with self._write_lock:
+                    for i in range(0, len(cancel), mtu):
+                        await self.client.write_gatt_char(
+                            RX_UUID, cancel[i : i + mtu], response=False
+                        )
             return {"ack": cmd, "ok": False, "err": "rpc timeout"}
         except ConnectionError as e:
             return {"ack": cmd, "ok": False, "err": str(e)}
