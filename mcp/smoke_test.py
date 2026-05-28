@@ -76,7 +76,7 @@ async def main() -> int:
 
     # ---- confirm ---------------------------------------------------
     print("→ confirm: 'DROP customers' (30s timeout)")
-    print("  >>> HOLD Y on the Cardputer for 3 seconds to confirm <<<")
+    print("  >>> TAP Y rapidly on the Cardputer for ~3 seconds to confirm <<<")
     print("  >>> or press N/ESC to cancel <<<")
     result = await bridge.send(
         "confirm",
