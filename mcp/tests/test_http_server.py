@@ -33,12 +33,28 @@ _H = {
 def client():
     # One app + one TestClient for the whole module: the FastMCP
     # streamable-HTTP session manager's lifespan can only run once per
-    # `mcp` instance, and `mcp` is a module-level singleton.
+    # `mcp` instance, and `mcp` is a module-level singleton. Two tokens
+    # so we can assert token -> agent-label mapping on the device banner.
     app = server.build_http_app(
-        {"tok": "claude-code"}, extra_allowed_hosts=["testserver"]
+        {"tok": "claude-code", "cloud": "managed-agent"},
+        extra_allowed_hosts=["testserver"],
     )
     with TestClient(app) as c:
         yield c
+
+
+def _init_session(client, token):
+    h = {**_H, "authorization": f"Bearer {token}"}
+    init = client.post("/mcp", headers=h, json=_INIT)
+    assert init.status_code == 200, init.text
+    sid = init.headers["mcp-session-id"]
+    h2 = {**h, "mcp-session-id": sid}
+    client.post(
+        "/mcp",
+        headers=h2,
+        json={"jsonrpc": "2.0", "method": "notifications/initialized"},
+    )
+    return h2
 
 
 def _sse_objects(text):
@@ -86,3 +102,30 @@ def test_initialize_and_tools_list_with_bearer(client):
         for tool in obj.get("result", {}).get("tools", []):
             names.add(tool["name"])
     assert {"notify", "ask", "confirm"} <= names, names
+
+
+def test_notify_threads_agent_label_from_token(client, monkeypatch):
+    # Capture what reaches the Bridge instead of touching BLE.
+    captured = {}
+
+    async def fake_send(cmd, payload, rpc_timeout_s=30.0, agent="mcp-client"):
+        captured["cmd"] = cmd
+        captured["agent"] = agent
+        return {"ack": cmd, "ok": True}
+
+    monkeypatch.setattr(server.bridge, "send", fake_send)
+
+    h = _init_session(client, "cloud")  # token "cloud" -> label "managed-agent"
+    r = client.post(
+        "/mcp",
+        headers=h,
+        json={
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "tools/call",
+            "params": {"name": "notify", "arguments": {"title": "hi"}},
+        },
+    )
+    assert r.status_code == 200, r.text
+    assert captured.get("cmd") == "notify"
+    assert captured.get("agent") == "managed-agent", captured

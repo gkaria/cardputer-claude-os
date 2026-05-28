@@ -37,7 +37,9 @@ from typing import Literal, Optional
 
 from bleak import BleakClient, BleakScanner
 from bleak.exc import BleakError
-from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp import Context, FastMCP
+
+from auth import label_for_authorization
 
 
 # ---- protocol constants --------------------------------------------
@@ -339,6 +341,7 @@ class Bridge:
         cmd: str,
         payload: dict,
         rpc_timeout_s: float = DEFAULT_RPC_TIMEOUT_S,
+        agent: str = "mcp-client",
     ) -> dict:
         """Send one command, await its ack. Returns the ack dict.
 
@@ -365,7 +368,7 @@ class Bridge:
             }
 
         mid = uuid.uuid4().hex[:8]
-        msg = {"cmd": cmd, "id": mid, "agent": "mcp-client", **payload}
+        msg = {"cmd": cmd, "id": mid, "agent": agent, **payload}
         data = (json.dumps(msg) + "\n").encode()
 
         fut: asyncio.Future = asyncio.get_event_loop().create_future()
@@ -413,8 +416,27 @@ mcp = FastMCP("cardputer")
 _TOKEN_MAP: dict[str, str] = {}
 
 
+def _agent_label(ctx) -> str:
+    """Resolve the requesting agent's banner label from its bearer token.
+
+    The label is derived from WHICH token authenticated (mapped in
+    `_TOKEN_MAP`), not from anything the caller can put in the tool
+    arguments — so a misled or injected agent can't forge its own
+    identity on the device's `ask`/`confirm` screen. stdio mode (no HTTP
+    request) resolves to "local".
+    """
+    if ctx is None:
+        return "local"
+    req = getattr(getattr(ctx, "request_context", None), "request", None)
+    if req is None:
+        return "local"
+    label = label_for_authorization(req.headers.get("authorization"), _TOKEN_MAP)
+    return label or "agent"
+
+
 @mcp.tool()
 async def notify(
+    ctx: Context,
     title: str,
     body: str = "",
     urgency: Literal["info", "warn", "crit"] = "info",
@@ -447,6 +469,7 @@ async def notify(
         "notify",
         {"title": title, "body": body, "urgency": urgency},
         rpc_timeout_s=10,
+        agent=_agent_label(ctx),
     )
     if result.get("ok"):
         return "shown"
@@ -458,6 +481,7 @@ async def notify(
 
 @mcp.tool()
 async def ask(
+    ctx: Context,
     question: str,
     choices: list[str],
     timeout_s: int = 60,
@@ -506,6 +530,7 @@ async def ask(
             "timeout_s": timeout_s,
         },
         rpc_timeout_s=rpc_timeout,
+        agent=_agent_label(ctx),
     )
 
     if result.get("ok") and "choice" in result:
@@ -524,6 +549,7 @@ async def ask(
 
 @mcp.tool()
 async def confirm(
+    ctx: Context,
     title: str,
     timeout_s: int = 30,
 ) -> str:
@@ -573,6 +599,7 @@ async def confirm(
         "confirm",
         {"title": title, "danger": True, "timeout_s": timeout_s},
         rpc_timeout_s=rpc_timeout,
+        agent=_agent_label(ctx),
     )
 
     if result.get("ok") and result.get("confirmed"):
