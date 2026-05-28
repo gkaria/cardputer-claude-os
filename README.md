@@ -38,17 +38,18 @@ that turn the Cardputer into a hand-held Claude device:
 
 ## What's new in this fork
 
-| Addition                         | Where                                                                                     | What it does                                                                                                                                                                                                 |
-| -------------------------------- | ----------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| **Cardputer MCP (host bridge)**  | [`mcp/`](mcp/)                                                                            | Stdio Model Context Protocol server (`bleak`-based) that any Claude or MCP client can register. Three tools: `notify`, `ask`, `confirm`. Talks BLE to the device app — no cloud, no Wi-Fi required.          |
-| **Cardputer MCP (device app)**   | [`buddy/device/apps/cardputer_mcp.py`](buddy/device/apps/cardputer_mcp.py)                | BLE GATT peripheral on a fresh service UUID block (`a5cd0001-…`), distinct from Buddy's NUS. Renders notifications, ask-question modals, and a hold-Y confirmation gesture; sends acks via TX notifications. |
-| **Cloudflare Worker relay**      | [`worker/`](worker/)                                                                      | Auth-gated edge endpoint. Whisper for STT, Claude Haiku 4.5 for the reply, Workers KV for per-device conversation memory (last 8 messages, 24 h TTL).                                                        |
-| **Voice + chat app**             | [`buddy/device/apps/push_to_claude.py`](buddy/device/apps/push_to_claude.py)              | On-device client. Streams WAV to the Worker as it records (flat RAM footprint), text-fallback mode, scrollable replies, `/reset` shortcut.                                                                   |
-| **Pager device app**             | [`buddy/device/apps/pager.py`](buddy/device/apps/pager.py)                                | Three-screen UI (Compose / Inbox / Detail) for firing and triaging Managed Agents sessions from the QWERTY. Long-polls the Worker for live event ticker.                                                     |
-| **SessionRouter Durable Object** | [`worker/src/router.do.js`](worker/src/router.do.js)                                      | One DO per Anthropic session. Lazily polls the Managed Agents `events.list` endpoint, mirrors events into DO storage, and serves both the Pager (poll) and Console (SSE).                                    |
-| **Central Console (browser)**    | [`worker/src/console.html`](worker/src/console.html)                                      | Single-file dark-theme HTML console served from the Worker. Live event stream, syntax-highlighted bash, inline diffs for `str_replace`, file pills, interrupt + reply. Token-gated, no build step.           |
-| **Mac artifact sync**            | [`mac/claude-pull`](mac/claude-pull) + [`launchd plist`](mac/com.claude.pager.pull.plist) | Stdlib Python script run every 60 s by launchd. Pulls each session's `/workspace/out/` files into `~/ClaudeRuns/<title>-<id>/` and posts a banner notification when a session completes.                     |
-| **Externalized device config**   | [`buddy/device/apps/config.example.py`](buddy/device/apps/config.example.py)              | Worker URL + device secret loaded from a gitignored `config.py` so secrets never enter the repo.                                                                                                             |
+| Addition                         | Where                                                                                        | What it does                                                                                                                                                                                                                                                                                                   |
+| -------------------------------- | -------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Cardputer MCP (host bridge)**  | [`mcp/`](mcp/)                                                                               | Stdio Model Context Protocol server (`bleak`-based) that any Claude or MCP client can register. Three tools: `notify`, `ask`, `confirm`. Talks BLE to the device app — no cloud, no Wi-Fi required.                                                                                                            |
+| **Cardputer MCP (device app)**   | [`buddy/device/apps/cardputer_mcp.py`](buddy/device/apps/cardputer_mcp.py)                   | BLE GATT peripheral on a fresh service UUID block (`a5cd0001-…`), distinct from Buddy's NUS. Renders notifications, ask-question modals, and a hold-Y confirmation gesture; sends acks via TX notifications.                                                                                                   |
+| **Cloudflare Worker relay**      | [`worker/`](worker/)                                                                         | Auth-gated edge endpoint. Whisper for STT, Claude Haiku 4.5 for the reply, Workers KV for per-device conversation memory (last 8 messages, 24 h TTL).                                                                                                                                                          |
+| **Voice + chat app**             | [`buddy/device/apps/push_to_claude.py`](buddy/device/apps/push_to_claude.py)                 | On-device client. Streams WAV to the Worker as it records (flat RAM footprint), text-fallback mode, scrollable replies, `/reset` shortcut.                                                                                                                                                                     |
+| **Pager device app**             | [`buddy/device/apps/pager.py`](buddy/device/apps/pager.py)                                   | Three-screen UI (Compose / Inbox / Detail) for firing and triaging Managed Agents sessions from the QWERTY. Long-polls the Worker for live event ticker.                                                                                                                                                       |
+| **SessionRouter Durable Object** | [`worker/src/router.do.js`](worker/src/router.do.js)                                         | One DO per Anthropic session. Lazily polls the Managed Agents `events.list` endpoint, mirrors events into DO storage, and serves both the Pager (poll) and Console (SSE).                                                                                                                                      |
+| **Central Console (browser)**    | [`worker/src/console.html`](worker/src/console.html)                                         | Single-file dark-theme HTML console served from the Worker. Live event stream, syntax-highlighted bash, inline diffs for `str_replace`, file pills, interrupt + reply. Token-gated, no build step.                                                                                                             |
+| **Mac artifact sync**            | [`mac/claude-pull`](mac/claude-pull) + [`launchd plist`](mac/com.claude.pager.pull.plist)    | Stdlib Python script run every 60 s by launchd. Pulls each session's `/workspace/out/` files into `~/ClaudeRuns/<title>-<id>/` and posts a banner notification when a session completes.                                                                                                                       |
+| **Externalized device config**   | [`buddy/device/apps/config.example.py`](buddy/device/apps/config.example.py)                 | Worker URL + device secret loaded from a gitignored `config.py` so secrets never enter the repo.                                                                                                                                                                                                               |
+| **Cardputer Companion skill**    | [`.claude/skills/cardputer-companion/SKILL.md`](.claude/skills/cardputer-companion/SKILL.md) | Instructions-only Agent Skill. The behavioral counterpart to the MCP server: it teaches Claude _when_ to reach for `notify`/`ask`/`confirm` and _how_ to format for the 240×135 LCD — mandating physical `confirm` before irreversible ops, buzzing only on long-task completion, and otherwise staying quiet. |
 
 See [`worker/README.md`](worker/README.md) for the full Cloudflare deploy
 guide.
@@ -171,6 +172,33 @@ trip, no Wi-Fi required. Pairing cache lives at
    You should see the banner flash on the device, hear a chirp,
    and Claude gets back `"shown"`. The whole round trip is
    sub-second after the first connect.
+
+### Make Claude reach for the device on its own (the companion skill)
+
+The three tools above are the device's _hands_; out of the box Claude
+only uses them when you explicitly ask it to ("buzz the Cardputer…").
+The bundled [`cardputer-companion`](.claude/skills/cardputer-companion/SKILL.md)
+Agent Skill adds the _manners_ — it teaches Claude **when** to reach
+for them and **how** to format for the tiny screen, with no extra code:
+
+- **Confirm before irreversible ops.** Production deploys, force pushes,
+  `DROP TABLE`, `rm -rf`, paid side-effects → a physical hold-to-confirm
+  gesture, never a chat-message "are you sure?" (which a prompt injection
+  could forge). If the device is unreachable, Claude stops rather than
+  treating an absent safety device as approval.
+- **Buzz only when it matters.** One `notify` on completion of a
+  genuinely long task you're waiting on away from the keyboard — not a
+  play-by-play. The default posture is _quiet_.
+- **Ask when blocked and you're away** — a 2–4 choice question on the
+  QWERTY instead of stalling in chat.
+- **240×135 formatting** baked into every device message.
+
+It loads automatically in Claude Code whenever the `cardputer` MCP
+tools are registered (the skill lives at `.claude/skills/` in this
+repo, so it's discovered alongside `m5-onboard`). Nothing to install;
+nothing to configure. To see it in action, register the MCP server,
+then give Claude a real task — e.g. "run the test suite and let me
+know how it goes" — and step away from the laptop.
 
 ### macOS Bluetooth permission
 
@@ -424,7 +452,8 @@ export M5_BUDDY_DIR=/path/to/buddy/device
 
 ## What's in this repo
 
-- **`.claude/skills/m5-onboard/`** — the Claude Code skill. Detect port, flash UIFlow, install apps. See [`.claude/skills/m5-onboard/SKILL.md`](.claude/skills/m5-onboard/SKILL.md) for the full playbook and every gotcha baked into the scripts.
+- **`.claude/skills/m5-onboard/`** — the onboarding skill. Detect port, flash UIFlow, install apps. See [`.claude/skills/m5-onboard/SKILL.md`](.claude/skills/m5-onboard/SKILL.md) for the full playbook and every gotcha baked into the scripts.
+- **`.claude/skills/cardputer-companion/`** — the runtime-etiquette skill. Teaches Claude when and how to use the Cardputer MCP tools (`notify`/`ask`/`confirm`). Instructions only — no scripts. See [`.claude/skills/cardputer-companion/SKILL.md`](.claude/skills/cardputer-companion/SKILL.md).
 - **`buddy/`** — the MicroPython app bundle that gets installed. See [`buddy/README.md`](buddy/README.md) for device-side layout and iteration tooling.
 - **`worker/`** — the Cloudflare Worker that powers Push to Claude (voice + chat memory). See [`worker/README.md`](worker/README.md) for deploy instructions.
 
