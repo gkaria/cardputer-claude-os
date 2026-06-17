@@ -117,7 +117,7 @@ def test_initialize_and_tools_list_with_bearer(client):
     for obj in _sse_objects(tl.text):
         for tool in obj.get("result", {}).get("tools", []):
             names.add(tool["name"])
-    assert {"notify", "ask", "confirm"} <= names, names
+    assert {"notify", "ask", "confirm", "show"} <= names, names
 
 
 def test_notify_threads_agent_label_from_token(client, monkeypatch):
@@ -237,3 +237,60 @@ def test_notify_rate_limit_independent_per_agent(client, monkeypatch):
     assert "shown" in _call_texts(client, h_cloud, "notify", {"title": "b"}, 21)
     # Same agent again -> throttled.
     assert "rate-limited" in _call_texts(client, h_local, "notify", {"title": "c"}, 22)
+
+
+def test_show_sends_text_and_channel(client, monkeypatch):
+    captured = {}
+
+    async def fake_send(cmd, payload, rpc_timeout_s=30.0, agent="mcp-client"):
+        captured["cmd"] = cmd
+        captured["payload"] = payload
+        captured["agent"] = agent
+        return {"ack": cmd, "ok": True}
+
+    monkeypatch.setattr(server.bridge, "send", fake_send)
+    h = _init_session(client, "cloud")  # managed-agent
+    texts = _call_texts(
+        client, h, "show", {"text": "running pytest", "channel": "ci"}, 30
+    )
+    assert "shown" in texts, texts
+    assert captured["cmd"] == "show"
+    assert captured["payload"] == {"text": "running pytest", "channel": "ci"}
+    assert captured["agent"] == "managed-agent"
+
+
+def test_show_defaults_channel_to_agent_label(client, monkeypatch):
+    captured = {}
+
+    async def fake_send(cmd, payload, rpc_timeout_s=30.0, agent="mcp-client"):
+        captured["payload"] = payload
+        return {"ack": cmd, "ok": True}
+
+    monkeypatch.setattr(server.bridge, "send", fake_send)
+    h = _init_session(client, "tok")  # claude-code
+    _call_texts(client, h, "show", {"text": "idle ok"}, 31)
+    # No channel given -> falls back to the token-derived agent label.
+    assert captured["payload"]["channel"] == "claude-code"
+
+
+def test_show_truncates_long_text(client, monkeypatch):
+    captured = {}
+
+    async def fake_send(cmd, payload, rpc_timeout_s=30.0, agent="mcp-client"):
+        captured["payload"] = payload
+        return {"ack": cmd, "ok": True}
+
+    monkeypatch.setattr(server.bridge, "send", fake_send)
+    h = _init_session(client, "tok")
+    _call_texts(client, h, "show", {"text": "x" * 200}, 32)
+    assert len(captured["payload"]["text"]) == 48
+
+
+def test_show_unavailable_when_device_off(client, monkeypatch):
+    async def fake_send(cmd, payload, rpc_timeout_s=30.0, agent="mcp-client"):
+        return {"ack": cmd, "ok": False, "err": "unavailable: device not found"}
+
+    monkeypatch.setattr(server.bridge, "send", fake_send)
+    h = _init_session(client, "tok")
+    texts = _call_texts(client, h, "show", {"text": "hi"}, 33)
+    assert any(t.startswith("unavailable") for t in texts), texts

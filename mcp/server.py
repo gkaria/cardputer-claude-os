@@ -665,6 +665,52 @@ async def confirm(
     return f"failed: {err}"
 
 
+@mcp.tool()
+async def show(
+    ctx: Context,
+    text: str,
+    channel: str = "",
+) -> str:
+    """Update a single ambient status line on the user's Cardputer.
+
+    Non-blocking, silent, and unobtrusive — unlike `notify`, this makes no
+    sound and never takes over the screen. It writes one line to a small
+    status area on the device's idle screen so the user can *glance* at their
+    pocket and see what you're doing right now ("running pytest", "wrote
+    auth.py", "idle ok"). Think of it as a status bar, not an alert.
+
+    Use it to keep a live heartbeat of a long task visible without buzzing the
+    user. Call it as your work progresses; each call replaces the previous
+    line for the same `channel`. `channel` is a short tag (defaults to your
+    agent label) so several agents can each own a line — the device keeps the
+    most recent few. Keep `text` to ~40 characters (the LCD is 240×135).
+
+    Because it's ambient it does NOT honor Do Not Disturb (there's nothing to
+    disturb: no sound, no takeover) and it is NOT rate-limited — but update at
+    a human-readable cadence, not on every token.
+
+    Returns 'shown', 'unavailable: <reason>' if the device isn't connected, or
+    'failed: <reason>' (e.g. older firmware that doesn't support `show`).
+    """
+    text = str(text)[:48]
+    agent = _agent_label(ctx)
+    # Channel defaults to the (unforgeable, token-derived) agent label so each
+    # agent owns its own status line without having to invent a tag.
+    channel = (str(channel).strip() or agent)[:16]
+    result = await bridge.send(
+        "show",
+        {"text": text, "channel": channel},
+        rpc_timeout_s=5,
+        agent=agent,
+    )
+    if result.get("ok"):
+        return "shown"
+    err = result.get("err", "unknown")
+    if err.startswith("unavailable"):
+        return err
+    return f"failed: {err}"
+
+
 # ---- HTTP transport (the cloud-bridge path, via an MCP tunnel) ------
 
 
