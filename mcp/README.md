@@ -14,13 +14,13 @@ status — all without the user needing to refocus to their laptop.
 The host-side bridge speaks Bluetooth Low Energy via `bleak` to the
 `cardputer_mcp.py` device app. Three tools work end-to-end:
 
-| Tool                                | iter 2                           | iter 3                             | iter 4                      |
-| ----------------------------------- | -------------------------------- | ---------------------------------- | --------------------------- |
-| `notify(title, body, urgency)`      | ✅ visual banner + speaker chirp | rate-limit, per-agent tags         | —                           |
-| `ask(question, choices, timeout_s)` | ✅ blocks on QWERTY input        | DND awareness                      | —                           |
-| `confirm(title, timeout_s)`         | —                                | ✅ TAP-Y-fast 3 s physical gesture | —                           |
-| `show(text, channel)`               | —                                | —                                  | ambient line on LCD         |
-| `dictate(prompt, max_seconds)`      | —                                | —                                  | mic → Worker/Whisper → text |
+| Tool                                 | iter 2                           | iter 3                             | iter 4 +                            |
+| ------------------------------------ | -------------------------------- | ---------------------------------- | ----------------------------------- |
+| `notify(title, body, urgency)`       | ✅ visual banner + speaker chirp | ✅ per-agent rate-limit + tags     | —                                   |
+| `ask(question, choices, timeout_s)`  | ✅ blocks on QWERTY input        | ✅ DND awareness                   | —                                   |
+| `confirm(title, details, timeout_s)` | —                                | ✅ TAP-Y-fast 3 s physical gesture | ✅ scrollable action diff (details) |
+| `show(text, channel)`                | —                                | —                                  | ✅ ambient line on LCD              |
+| `dictate(prompt, max_seconds)`       | —                                | —                                  | mic → Worker/Whisper → text         |
 
 `confirm` is the differentiator. It demands a physical, sustained
 gesture from the user before returning success — a prompt injection
@@ -232,17 +232,23 @@ but its gesture is less polished than the brand promised.
 - [x] iter 1: scaffold with stubbed transport
 - [x] iter 2: real BLE transport; `notify` and `ask` end-to-end
 - [x] iter 3: `confirm` with hold-Y-3s physical gesture
-- [~] iter 4: DND switch ✅ + per-agent identity on the banner ✅;
-  `show` (ambient line) / `dictate` (mic → Whisper) still pending
+- [x] iter 4: DND switch ✅ + per-agent identity on the banner ✅ +
+      `show` ambient status line ✅ + per-agent notify rate-limit ✅
+      (`ratelimit.py`); `dictate` (mic → Whisper) still pending
 - [x] iter 5: **cloud agents via MCP tunnel** — a streamable-http daemon
       (`CARDPUTER_HTTP=1`) behind `cloudflared` + `mcp-proxy`, reached by
       Managed Agents / the Messages API. Replaces the originally-planned
       bespoke Worker bridge with Anthropic's productized MCP tunnel. See
       `/tunnel/` and `/docs/superpowers/`.
+- [x] **verified approval**: `confirm(details=…)` renders an agent-supplied
+      scrollable action diff (the real command / SQL / diff / payee) above the
+      hold-Y gesture (fw `0.4.0`, cap `confirm_details`) — you approve _what
+      you read_, the hardware-wallet model.
 - [ ] iter 6: inverse direction — programmable launcher buttons
       that fire Managed Agents tasks
-- [ ] later: signed-consent receipts, on-device action diff, multi-party
-      quorum (documented future ladder in the design spec)
+- [ ] later: **trusted daemon-computed** action diffs (so the agent can't
+      author the text it asks you to approve), signed-consent receipts, and
+      multi-party quorum (the future ladder in the design spec)
 
 ## License
 
