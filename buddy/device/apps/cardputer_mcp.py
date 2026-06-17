@@ -59,8 +59,13 @@ _RX_CHAR = (RX_UUID, _FLAG_WRITE | _FLAG_WRITE_NR)
 _TX_CHAR = (TX_UUID, _FLAG_READ | _FLAG_NOTIFY)
 _SVC = (SERVICE_UUID, (_RX_CHAR, _TX_CHAR))
 
-_FW_VERSION = "0.3.0"
-_CAPS = ["notify", "ask", "confirm"]
+_FW_VERSION = "0.4.0"
+# Capabilities advertised in `hello`. The host gates tool calls on these:
+#   confirm_details — confirm renders an agent-supplied scrollable action diff
+#   show            — ambient single-line status updates on the idle screen
+# Old hosts ignore caps they don't use; new hosts skip the radio for caps a
+# device doesn't advertise. Keep in sync with /mcp/server.py.
+_CAPS = ["notify", "ask", "confirm", "confirm_details", "show"]
 _MTU = 20  # default ATT MTU minus framing; chunk every TX write at this
 
 # How long the user must hold Y for `confirm` to succeed. Picked high
@@ -101,6 +106,23 @@ _H = 135
 # idle status display, in ms. Long enough to read a 3-line body
 # comfortably, short enough that a stale notification doesn't loiter.
 _NOTIFY_LINGER_MS = 5000
+
+# Ambient `show` status: how many channels we keep (newest-first, one line
+# per channel) and how wide each wrapped detail/status line is at size-1
+# DejaVu9 (~6 px/char on the 240-px LCD, leaving a margin).
+_AMBIENT_MAX = 3
+# Chars per wrapped line at size-1 DejaVu9. Held a little under the full
+# width so the confirm details box leaves a right-edge column for the
+# scroll-position arrows.
+_DETAIL_WRAP = 36
+
+# `confirm` action diff: how many wrapped detail lines are visible at once in
+# the scrollable box. The rest scroll into view with the arrow cluster.
+_CONFIRM_DETAIL_VISIBLE = 5
+# Belt-and-suspenders cap on details length on the device, independent of the
+# host's 320-char cap — bounds RAM + IRQ-context json parse time even if a
+# future/foreign host sends more.
+_CONFIRM_DETAILS_MAX = 400
 
 
 # ---- BLE peripheral ------------------------------------------------
@@ -448,6 +470,11 @@ class App:
         self.notify_data = None  # {"title", "body", "urgency"}
         self.notify_expires_at = 0
 
+        # Ambient `show` state: newest-first list of {"channel", "text"},
+        # one entry per channel, capped at _AMBIENT_MAX. Rendered on the idle
+        # screen only — it never interrupts a banner or modal.
+        self.ambient = []
+
         # Ask state.
         self.pending_ask = None  # {"id", "question", "choices", "deadline"}
 
@@ -459,6 +486,9 @@ class App:
         self.pending_confirm = None  # {"id", "title", "danger", "deadline"}
         self._y_held_since_ms = None
         self._last_y_seen_ms = None
+        # Scroll offset into a confirm's wrapped action-diff `detail_lines`
+        # (0 = top). Reset on each new confirm; the arrow cluster scrolls it.
+        self._confirm_scroll = 0
 
         # Side-effect queue (set from IRQ, drained in main loop).
         self._dirty = True
@@ -495,6 +525,8 @@ class App:
             self._cmd_ask(msg, mid)
         elif cmd == "confirm":
             self._cmd_confirm(msg, mid)
+        elif cmd == "show":
+            self._cmd_show(msg, mid)
         elif cmd == "ping":
             self.ble.send({"ack": "ping", "id": mid, "ok": True})
         elif cmd == "cancel":
@@ -528,6 +560,26 @@ class App:
             self._dirty = True
         self._pending_chirp = self.notify_data["urgency"]
         self.ble.send({"ack": "notify", "id": mid, "ok": True})
+
+    def _cmd_show(self, msg, mid):
+        """Update one ambient status line (the iter-4 `show` command).
+
+        Silent and non-interrupting by design: no chirp, and we only repaint
+        when the idle screen is actually visible — if a banner or modal is up,
+        the latest text is stored and shown the moment the screen reverts.
+        DND does not apply (there's nothing to disturb). One entry per
+        channel, newest first, capped at _AMBIENT_MAX.
+        """
+        channel = str(msg.get("channel", ""))[:16] or "agent"
+        text = str(msg.get("text", ""))[:48]
+        # Replace any existing entry for this channel, then push to front.
+        self.ambient = [e for e in self.ambient if e["channel"] != channel]
+        self.ambient.insert(0, {"channel": channel, "text": text})
+        if len(self.ambient) > _AMBIENT_MAX:
+            self.ambient = self.ambient[:_AMBIENT_MAX]
+        if self.state == "idle":
+            self._dirty = True
+        self.ble.send({"ack": "show", "id": mid, "ok": True})
 
     def _cmd_ask(self, msg, mid):
         if self.dnd:
@@ -626,6 +678,11 @@ class App:
         title = str(msg.get("title", ""))[:64]
         timeout_s = max(5, min(120, int(msg.get("timeout_s", 30))))
         danger = bool(msg.get("danger", True))
+        # Optional action diff: the real command/SQL/diff the user is
+        # approving. Pre-wrap once here (not every redraw) so the render path
+        # is cheap. None when absent -> the title-only layout is used verbatim.
+        details = str(msg.get("details", ""))[:_CONFIRM_DETAILS_MAX]
+        detail_lines = _wrap_detail_lines(details) if details else None
 
         if self.pending_ask:
             self.ble.send(
@@ -656,12 +713,14 @@ class App:
             "danger": danger,
             "deadline": time.ticks_add(time.ticks_ms(), timeout_s * 1000),
             "agent": str(msg.get("agent", ""))[:20],
+            "detail_lines": detail_lines,
         }
         # Start with no hold in progress. Even if the user happened to
         # be holding Y from the prior screen, they restart from zero —
         # the new confirm is a fresh consent, not an inherited one.
         self._y_held_since_ms = None
         self._last_y_seen_ms = None
+        self._confirm_scroll = 0
         self.state = "confirm"
         self._dirty = True
         # `crit` chirp regardless of `danger` flag — the audible cue
@@ -676,6 +735,23 @@ class App:
     def handle_keypress(self, k):
         """Return True if the app should exit (back to launcher)."""
         if self.state == "confirm" and self.pending_confirm:
+            # Arrow cluster scrolls the action diff when one is present.
+            # Scrolling does NOT advance the hold (no Y event), so the user
+            # reads the whole diff first, then taps Y to consent.
+            detail_lines = self.pending_confirm.get("detail_lines")
+            if detail_lines:
+                intent = _scroll_intent(k)
+                if intent == "up":
+                    if self._confirm_scroll > 0:
+                        self._confirm_scroll -= 1
+                        self._dirty = True
+                    return False
+                if intent == "down":
+                    max_off = max(0, len(detail_lines) - _CONFIRM_DETAIL_VISIBLE)
+                    if self._confirm_scroll < max_off:
+                        self._confirm_scroll += 1
+                        self._dirty = True
+                    return False
             if isinstance(k, int):
                 # Y / y advances the hold. The actual "did we hit
                 # threshold?" check happens here too so confirmation
@@ -873,25 +949,58 @@ class App:
             _LCD.setTextColor(_YELLOW, _DARK)
             _LCD.drawString(chip, _W - _LCD.textWidth(chip) - 6, 5)
 
-        # Status line — green when an MCP host is paired, gray otherwise.
         status_text = "READY" if self.ble_connected else "waiting for bridge"
         status_color = _GREEN if self.ble_connected else _GRAY_MID
-        _LCD.setTextSize(2)
-        _LCD.setTextColor(status_color, _BLACK)
-        _LCD.drawString(
-            status_text, (_W - _LCD.textWidth(status_text)) // 2, 42
-        )
 
-        # Device identity — useful when the user has multiple devices
-        # in range or is trying to figure out which one to pair with.
-        _LCD.setTextSize(1)
-        _LCD.setTextColor(_GRAY_MID, _BLACK)
-        _LCD.drawString(self.ble.name, (_W - _LCD.textWidth(self.ble.name)) // 2, 74)
+        if self.ambient:
+            # Live layout: compact status + identity on one row, then the
+            # ambient `show` lines (newest first). The big centered status is
+            # dropped to make room — the agents' status is the point now.
+            _LCD.setTextSize(1)
+            _LCD.setTextColor(status_color, _BLACK)
+            _LCD.drawString(status_text, 6, 26)
+            _LCD.setTextColor(_GRAY_MID, _BLACK)
+            _LCD.drawString(
+                self.ble.name, _W - _LCD.textWidth(self.ble.name) - 6, 26
+            )
+            _LCD.fillRect(0, 40, _W, 1, _DARK)
+            self._draw_ambient(start_y=46)
+        else:
+            # Idle layout — unchanged from before `show` existed: big centered
+            # status + device identity, lots of calm whitespace.
+            _LCD.setTextSize(2)
+            _LCD.setTextColor(status_color, _BLACK)
+            _LCD.drawString(
+                status_text, (_W - _LCD.textWidth(status_text)) // 2, 42
+            )
+            _LCD.setTextSize(1)
+            _LCD.setTextColor(_GRAY_MID, _BLACK)
+            _LCD.drawString(
+                self.ble.name, (_W - _LCD.textWidth(self.ble.name)) // 2, 74
+            )
 
         _LCD.fillRect(0, _H - 18, _W, 18, _DARK)
         _LCD.setTextColor(_GRAY_MID, _DARK)
         hint = "Q menu   D:DND {}".format("on" if self.dnd else "off")
         _LCD.drawString(hint, (_W - _LCD.textWidth(hint)) // 2, _H - 14)
+
+    def _draw_ambient(self, start_y):
+        """Render the ambient `show` lines (channel in orange, text in cream),
+        one per row from `start_y`. Caller has already cleared the area."""
+        _LCD.setTextSize(1)
+        y = start_y
+        for e in self.ambient[:_AMBIENT_MAX]:
+            chan = (e.get("channel") or "agent")[:12]
+            _LCD.setTextColor(_ORANGE, _BLACK)
+            _LCD.drawString(chan, 6, y)
+            text_x = 6 + _LCD.textWidth(chan + " ")
+            # Trim text to the remaining char budget on the row so it doesn't
+            # run off the 240-px edge (the channel ate part of the width).
+            budget = _DETAIL_WRAP - len(chan) - 1
+            text = e.get("text", "")[:budget] if budget > 0 else ""
+            _LCD.setTextColor(_CREAM, _BLACK)
+            _LCD.drawString(text, text_x, y)
+            y += 14
 
     def _draw_notify(self):
         if not self.notify_data:
@@ -981,6 +1090,11 @@ class App:
 
     def _draw_confirm(self):
         if not self.pending_confirm:
+            return
+        # With an action diff, use the dense scrollable layout. Without one,
+        # fall through to the original title-only screen verbatim.
+        if self.pending_confirm.get("detail_lines"):
+            self._draw_confirm_details()
             return
 
         _LCD.fillScreen(_BLACK)
@@ -1075,6 +1189,88 @@ class App:
         hint = "TAP Y - N/ESC cancel"
         _LCD.drawString(hint, (_W - _LCD.textWidth(hint)) // 2, _H - 14)
 
+    def _draw_confirm_details(self):
+        """Confirm screen WITH a scrollable action diff (the verified-approval
+        / hardware-wallet layout). The user reads the real command/SQL/diff,
+        scrolls with the arrow cluster, then taps Y to consent. Denser than the
+        title-only screen; the title-only path above is left untouched.
+        """
+        pc = self.pending_confirm
+        lines = pc.get("detail_lines") or []
+
+        _LCD.fillScreen(_BLACK)
+
+        # Same red danger chrome as the title-only screen so the gesture's
+        # meaning is unmistakable — only the body is denser.
+        _LCD.fillRect(0, 0, _W, 20, _RED)
+        _LCD.fillRect(0, 20, _W, 1, _ORANGE)
+        _LCD.setTextSize(1)
+        _LCD.setTextColor(_CREAM, _RED)
+        _LCD.drawString("DANGER  CONFIRM", 6, 5)
+
+        agent = pc.get("agent") or ""
+        if agent:
+            label = "from:" + agent[:14]
+            _LCD.setTextColor(_CREAM, _RED)
+            _LCD.drawString(label, _W - _LCD.textWidth(label) - 6, 5)
+
+        # Title (the WHAT) — compact, one line, so the diff gets the room.
+        _LCD.setTextSize(1)
+        _LCD.setTextColor(_CREAM, _BLACK)
+        _LCD.drawString(pc["title"][:_DETAIL_WRAP], 6, 24)
+
+        # Scrollable details window: a window of _CONFIRM_DETAIL_VISIBLE lines
+        # starting at the current scroll offset.
+        scroll = self._confirm_scroll
+        visible = lines[scroll : scroll + _CONFIRM_DETAIL_VISIBLE]
+        y = 38
+        _LCD.setTextColor(_CREAM, _BLACK)
+        for line in visible:
+            _LCD.drawString(line, 6, y)
+            y += 12
+
+        # Scroll-position arrows (drawn last, over a black bg, so they sit
+        # cleanly in the right-edge column the narrower wrap reserves).
+        _LCD.setTextColor(_ORANGE, _BLACK)
+        if scroll > 0:
+            _LCD.drawString("^", _W - 10, 38)
+        if scroll + _CONFIRM_DETAIL_VISIBLE < len(lines):
+            _LCD.drawString("v", _W - 10, 86)
+
+        # Progress bar — thinner than the title-only screen to fit the diff.
+        bar_w = 220
+        bar_h = 7
+        bar_x = (_W - bar_w) // 2
+        bar_y = 99
+        _LCD.drawRect(bar_x, bar_y, bar_w, bar_h, _CREAM)
+        if self._y_held_since_ms is not None:
+            held_ms = time.ticks_diff(time.ticks_ms(), self._y_held_since_ms)
+            progress = held_ms / _CONFIRM_HOLD_MS
+            if progress > 1.0:
+                progress = 1.0
+            elif progress < 0.0:
+                progress = 0.0
+            fill_w = int((bar_w - 2) * progress)
+            if fill_w > 0:
+                _LCD.fillRect(bar_x + 1, bar_y + 1, fill_w, bar_h - 2, _RED)
+
+        # The hint strip doubles as the live hold/scroll status to reclaim the
+        # vertical space the diff consumes.
+        _LCD.fillRect(0, _H - 18, _W, 18, _DARK)
+        if self._y_held_since_ms is not None:
+            held_ms = time.ticks_diff(time.ticks_ms(), self._y_held_since_ms)
+            secs = max(0, _CONFIRM_HOLD_MS - held_ms) / 1000.0
+            hint = "TAP Y {:.1f}s".format(secs)
+            color = _CREAM
+        else:
+            hint = "TAP Y rapidly"
+            color = _GRAY_MID
+        if len(lines) > _CONFIRM_DETAIL_VISIBLE:
+            hint += "  ;/. scroll"
+        hint += "  N cancel"
+        _LCD.setTextColor(color, _DARK)
+        _LCD.drawString(hint, (_W - _LCD.textWidth(hint)) // 2, _H - 14)
+
     def teardown(self):
         """Best-effort cleanup before the launcher returns.
 
@@ -1136,6 +1332,51 @@ def _is_q(k):
     if isinstance(k, str) and k:
         return k.lower() == "q"
     return False
+
+
+def _scroll_intent(k):
+    """Return 'up' / 'down' for the Cardputer arrow cluster (`;`/`,` = up,
+    `.`/`/` = down), matching the mapping the launcher and the other apps use.
+    None for anything that isn't a scroll key.
+    """
+    if k is None:
+        return None
+    if isinstance(k, int):
+        if 0x20 <= k <= 0x7E:
+            k = chr(k)
+        else:
+            return None
+    if not isinstance(k, str) or not k:
+        return None
+    ch = k.lower()
+    if ch in (";", ","):
+        return "up"
+    if ch in (".", "/"):
+        return "down"
+    return None
+
+
+def _wrap_detail_lines(text, width=_DETAIL_WRAP, max_lines=40):
+    """Wrap confirm action-diff `text` into display rows.
+
+    Splits on newlines first (so each command/SQL/diff line keeps its own
+    row), then hard-wraps any overlong row at `width` chars. Bounded to
+    `max_lines` so a pathological payload can't grow unbounded on the device.
+    """
+    out = []
+    for raw in text.split("\n"):
+        raw = raw.rstrip("\r")
+        if raw == "":
+            out.append("")
+        else:
+            i = 0
+            n = len(raw)
+            while i < n:
+                out.append(raw[i : i + width])
+                i += width
+        if len(out) >= max_lines:
+            break
+    return out[:max_lines]
 
 
 def _chirp(urgency):
