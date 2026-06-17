@@ -294,3 +294,55 @@ def test_show_unavailable_when_device_off(client, monkeypatch):
     h = _init_session(client, "tok")
     texts = _call_texts(client, h, "show", {"text": "hi"}, 33)
     assert any(t.startswith("unavailable") for t in texts), texts
+
+
+def test_confirm_includes_details_when_provided(client, monkeypatch):
+    captured = {}
+
+    async def fake_send(cmd, payload, rpc_timeout_s=30.0, agent="mcp-client"):
+        captured["payload"] = payload
+        return {"ack": cmd, "ok": True, "confirmed": True, "hold_ms": 3100}
+
+    monkeypatch.setattr(server.bridge, "send", fake_send)
+    h = _init_session(client, "cloud")  # managed-agent
+    texts = _call_texts(
+        client,
+        h,
+        "confirm",
+        {"title": "DROP customers", "details": "DROP TABLE customers; -- prod"},
+        40,
+    )
+    assert any(t.startswith("confirmed") for t in texts), texts
+    assert captured["payload"]["details"] == "DROP TABLE customers; -- prod"
+    assert captured["payload"]["title"] == "DROP customers"
+    assert captured["payload"]["danger"] is True
+
+
+def test_confirm_omits_details_when_empty(client, monkeypatch):
+    # Back-compat: with no details, the field must not appear in the payload
+    # (old firmware sees exactly today's confirm line).
+    captured = {}
+
+    async def fake_send(cmd, payload, rpc_timeout_s=30.0, agent="mcp-client"):
+        captured["payload"] = payload
+        return {"ack": cmd, "ok": True, "confirmed": True, "hold_ms": 3000}
+
+    monkeypatch.setattr(server.bridge, "send", fake_send)
+    h = _init_session(client, "tok")
+    _call_texts(client, h, "confirm", {"title": "deploy prod"}, 41)
+    assert "details" not in captured["payload"]
+
+
+def test_confirm_truncates_long_details(client, monkeypatch):
+    captured = {}
+
+    async def fake_send(cmd, payload, rpc_timeout_s=30.0, agent="mcp-client"):
+        captured["payload"] = payload
+        return {"ack": cmd, "ok": True, "confirmed": True, "hold_ms": 3000}
+
+    monkeypatch.setattr(server.bridge, "send", fake_send)
+    h = _init_session(client, "tok")
+    _call_texts(
+        client, h, "confirm", {"title": "big", "details": "x" * 5000}, 42
+    )
+    assert len(captured["payload"]["details"]) == server._CONFIRM_DETAILS_MAX
