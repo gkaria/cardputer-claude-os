@@ -119,10 +119,12 @@ _DETAIL_WRAP = 36
 # `confirm` action diff: how many wrapped detail lines are visible at once in
 # the scrollable box. The rest scroll into view with the arrow cluster.
 _CONFIRM_DETAIL_VISIBLE = 5
-# Belt-and-suspenders cap on details length on the device, independent of the
-# host's 320-char cap — bounds RAM + IRQ-context json parse time even if a
-# future/foreign host sends more.
-_CONFIRM_DETAILS_MAX = 400
+# Post-parse RAM belt on details length, independent of the host's 256-char
+# wire cap. The wire itself is bounded by the host (256) and by the 512-byte
+# RX-line guard in MCPBLE._irq, so by the time we get here the string is
+# already small; this just caps what we wrap+retain. Headroom over 256 in case
+# a foreign host sends a bit more.
+_CONFIRM_DETAILS_MAX = 320
 
 
 # ---- BLE peripheral ------------------------------------------------
@@ -286,10 +288,10 @@ class MCPBLE:
             conn, handle = data
             if handle == self._rx_h:
                 self._rx_buf += self._ble.gatts_read(self._rx_h)
-                # Split on newline and dispatch one line at a time.
-                # Heavy parsing (json.loads) on the IRQ context is
-                # what Buddy does too — if it gets in the way of
-                # the BLE stack we'll move it behind a queue.
+                # Split on newline and dispatch one line at a time. json.loads
+                # runs here in IRQ context, so the handler must stay quick;
+                # legitimate lines are small (the host caps `confirm` details
+                # so the whole line stays well under the 512-byte RX buffer).
                 while True:
                     nl = self._rx_buf.find(b"\n")
                     if nl < 0:
@@ -298,6 +300,13 @@ class MCPBLE:
                     # MicroPython bytearray doesn't support `del buf[:n]`,
                     # so we copy. Lines are short; cost is negligible.
                     self._rx_buf = bytearray(self._rx_buf[nl + 1 :])
+                    # Guard the IRQ budget: a legitimate line never exceeds the
+                    # 512-byte RX buffer, so anything larger is a buggy/rogue
+                    # host or already-corrupt framing. Drop it rather than risk
+                    # a slow json.loads stalling the BLE stack.
+                    if len(line) > 512:
+                        print("mcp_ble: oversized line, skipping:", len(line))
+                        continue
                     try:
                         msg = json.loads(line)
                         self._on_command(msg)
@@ -570,7 +579,10 @@ class App:
         DND does not apply (there's nothing to disturb). One entry per
         channel, newest first, capped at _AMBIENT_MAX.
         """
-        channel = str(msg.get("channel", ""))[:16] or "agent"
+        # Strip before the truthiness check (mirrors the host) so a
+        # whitespace-only channel falls back to "agent" instead of becoming a
+        # blank orphan entry in the ring.
+        channel = (str(msg.get("channel", "")).strip() or "agent")[:16]
         text = str(msg.get("text", ""))[:48]
         # Replace any existing entry for this channel, then push to front.
         self.ambient = [e for e in self.ambient if e["channel"] != channel]
@@ -682,7 +694,9 @@ class App:
         # approving. Pre-wrap once here (not every redraw) so the render path
         # is cheap. None when absent -> the title-only layout is used verbatim.
         details = str(msg.get("details", ""))[:_CONFIRM_DETAILS_MAX]
-        detail_lines = _wrap_detail_lines(details) if details else None
+        # Wrap only when there's real content — a whitespace-only payload
+        # would otherwise render as blank rows in the action-diff box.
+        detail_lines = _wrap_detail_lines(details) if details.strip() else None
 
         if self.pending_ask:
             self.ble.send(
@@ -1214,28 +1228,32 @@ class App:
             _LCD.setTextColor(_CREAM, _RED)
             _LCD.drawString(label, _W - _LCD.textWidth(label) - 6, 5)
 
-        # Title (the WHAT) — compact, one line, so the diff gets the room.
-        _LCD.setTextSize(1)
-        _LCD.setTextColor(_CREAM, _BLACK)
-        _LCD.drawString(pc["title"][:_DETAIL_WRAP], 6, 24)
-
-        # Scrollable details window: a window of _CONFIRM_DETAIL_VISIBLE lines
-        # starting at the current scroll offset.
         scroll = self._confirm_scroll
+        total = len(lines)
+        scrollable = total > _CONFIRM_DETAIL_VISIBLE
+
+        # Title (the WHAT) — compact, one line. When the diff scrolls, a
+        # position indicator ("3-7/12") sits right-aligned in the title row —
+        # NOT over the content lines — so it can never obscure a diff line.
+        _LCD.setTextSize(1)
+        title_max = _DETAIL_WRAP
+        if scrollable:
+            last = min(scroll + _CONFIRM_DETAIL_VISIBLE, total)
+            ind = "{}-{}/{}".format(scroll + 1, last, total)
+            _LCD.setTextColor(_ORANGE, _BLACK)
+            _LCD.drawString(ind, _W - _LCD.textWidth(ind) - 6, 24)
+            title_max = 22  # leave room for the indicator
+        _LCD.setTextColor(_CREAM, _BLACK)
+        _LCD.drawString(pc["title"][:title_max], 6, 24)
+
+        # Scrollable details window: _CONFIRM_DETAIL_VISIBLE lines from the
+        # current scroll offset.
         visible = lines[scroll : scroll + _CONFIRM_DETAIL_VISIBLE]
         y = 38
         _LCD.setTextColor(_CREAM, _BLACK)
         for line in visible:
             _LCD.drawString(line, 6, y)
             y += 12
-
-        # Scroll-position arrows (drawn last, over a black bg, so they sit
-        # cleanly in the right-edge column the narrower wrap reserves).
-        _LCD.setTextColor(_ORANGE, _BLACK)
-        if scroll > 0:
-            _LCD.drawString("^", _W - 10, 38)
-        if scroll + _CONFIRM_DETAIL_VISIBLE < len(lines):
-            _LCD.drawString("v", _W - 10, 86)
 
         # Progress bar — thinner than the title-only screen to fit the diff.
         bar_w = 220

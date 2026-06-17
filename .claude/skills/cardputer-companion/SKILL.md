@@ -61,7 +61,7 @@ Rules:
   the real shell command, the SQL, a short diff hunk, or payee + amount. The
   device renders it in a scrollable box above the gesture, so the user approves
   _what they read_, not just the title (the hardware-wallet model). Keep it to
-  the essential ~320 chars and strip noise. It's text you supply, so it's
+  the essential ~256 chars and strip noise. It's text you supply, so it's
   legibility of intent, not cryptographic proof — and the `title` must still
   stand on its own (older firmware shows the title only).
 - Do not call `confirm` for routine yes/no decisions — that's what `ask` is for.

@@ -97,10 +97,13 @@ clock=time.monotonic)` with `allow(key) -> bool`. Sibling to `auth.py`;
 ### 3.3 Verified Approval — `confirm(details=…)` (host + device)
 
 - **Host tool** `confirm(ctx, title, details="", timeout_s=30)`: when
-  `details` non-empty, include it (truncated to **480 chars** — bounded for
-  the device's 512-byte RX reassembly + RAM) in the BLE payload. New caps
-  helper `_device_caps()` lets the tool note when the connected firmware lacks
-  `confirm_details`. Title semantics unchanged.
+  `details` carries content (strip-check), include it (truncated to **256
+  chars** — shipped value, hardened down from the initial 480 so the whole
+  confirm line — envelope + ≤64-char title + details — fits the device's
+  512-byte RX reassembly buffer with margin) in the BLE payload. Title
+  semantics unchanged. _(The `_device_caps()` helper sketched here was dropped:
+  old firmware ignores the additive field and the companion skill keeps the
+  title self-sufficient, so an explicit host-side cap check added no value.)_
 - **Device** `_cmd_confirm`: store `details`; pre-wrap into `detail_lines`
   once on receipt (avoid re-wrapping each redraw — mirrors
   `push_to_claude._result_layout`). Reset `_confirm_scroll = 0`.

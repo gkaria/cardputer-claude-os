@@ -250,6 +250,13 @@ def test_show_does_not_chirp():
     assert app._pending_chirp is None  # ambient is silent
 
 
+def test_show_whitespace_channel_normalized_to_agent():
+    app = _fresh_app()
+    app.ble.send = lambda payload: True
+    app._cmd_show({"channel": "   ", "text": "y"}, "1")
+    assert app.ambient == [{"channel": "agent", "text": "y"}]
+
+
 # ---- App: confirm action diff + scrolling --------------------------------
 
 
@@ -271,6 +278,15 @@ def test_confirm_without_details_has_none_detail_lines():
     app = _fresh_app()
     app.ble.send = lambda payload: True
     app._cmd_confirm({"title": "deploy prod", "timeout_s": 30}, "c2")
+    assert app.pending_confirm["detail_lines"] is None
+
+
+def test_confirm_whitespace_only_details_treated_as_none():
+    app = _fresh_app()
+    app.ble.send = lambda payload: True
+    app._cmd_confirm(
+        {"title": "deploy prod", "details": "   \n  ", "timeout_s": 30}, "c2b"
+    )
     assert app.pending_confirm["detail_lines"] is None
 
 

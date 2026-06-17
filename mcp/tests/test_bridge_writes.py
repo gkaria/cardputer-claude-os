@@ -68,3 +68,33 @@ def test_concurrent_sends_do_not_interleave_chunks():
     assert len(objs) == 2, f"expected 2 clean messages, got {len(objs)}"
     payload_values = sorted(o["k"] for o in objs)
     assert payload_values == ["A" * 40, "B" * 40]
+
+
+def test_uncapped_command_short_circuits_without_writing():
+    """A command the device doesn't advertise (e.g. `show` on pre-0.4.0
+    firmware) is rejected by the capability gate before any BLE write, so
+    older firmware degrades gracefully instead of hanging."""
+
+    async def _drive():
+        bridge = server.Bridge()
+        bridge.hello = {"caps": ["notify", "ask", "confirm"], "mtu": 20}
+
+        async def _no_connect():
+            return None
+
+        bridge.ensure_connected = _no_connect
+
+        wrote = []
+
+        class _Client:
+            async def write_gatt_char(self, uuid, data, response=False):
+                wrote.append(bytes(data))
+
+        bridge.client = _Client()
+        result = await bridge.send("show", {"text": "hi", "channel": "ci"})
+        return result, wrote
+
+    result, wrote = asyncio.run(_drive())
+    assert result["ok"] is False
+    assert "does not advertise 'show'" in result["err"]
+    assert wrote == [], "uncapped command must not reach the radio"

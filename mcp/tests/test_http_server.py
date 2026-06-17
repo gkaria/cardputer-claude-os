@@ -346,3 +346,31 @@ def test_confirm_truncates_long_details(client, monkeypatch):
         client, h, "confirm", {"title": "big", "details": "x" * 5000}, 42
     )
     assert len(captured["payload"]["details"]) == server._CONFIRM_DETAILS_MAX
+
+
+def test_confirm_omits_whitespace_only_details(client, monkeypatch):
+    # A whitespace-only details payload must be treated as "no details" so it
+    # never bloats the line or renders as blank rows on the device.
+    captured = {}
+
+    async def fake_send(cmd, payload, rpc_timeout_s=30.0, agent="mcp-client"):
+        captured["payload"] = payload
+        return {"ack": cmd, "ok": True, "confirmed": True, "hold_ms": 3000}
+
+    monkeypatch.setattr(server.bridge, "send", fake_send)
+    h = _init_session(client, "tok")
+    _call_texts(client, h, "confirm", {"title": "x", "details": "   \n  "}, 43)
+    assert "details" not in captured["payload"]
+
+
+def test_show_whitespace_channel_falls_back_to_agent(client, monkeypatch):
+    captured = {}
+
+    async def fake_send(cmd, payload, rpc_timeout_s=30.0, agent="mcp-client"):
+        captured["payload"] = payload
+        return {"ack": cmd, "ok": True}
+
+    monkeypatch.setattr(server.bridge, "send", fake_send)
+    h = _init_session(client, "tok")  # claude-code
+    _call_texts(client, h, "show", {"text": "hi", "channel": "   "}, 44)
+    assert captured["payload"]["channel"] == "claude-code"

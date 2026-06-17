@@ -56,7 +56,13 @@ class MinIntervalLimiter:
 
     def allow(self, key: str) -> bool:
         """Return True (and record the time) if an event for ``key`` is
-        allowed now; False otherwise."""
+        allowed now; False otherwise.
+
+        Async-safety: callers are ``async`` tools sharing one daemon, but the
+        read-check-write below has no ``await`` point, so asyncio never
+        preempts mid-update and the plain dict is safe. Preserve that
+        invariant (or add an ``asyncio.Lock``) if this ever gains an await.
+        """
         if self._min <= 0:
             return True
         now = self._clock()

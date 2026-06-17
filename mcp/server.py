@@ -62,11 +62,13 @@ HELLO_TIMEOUT_S = 5.0
 DEFAULT_RPC_TIMEOUT_S = 30.0
 
 # Max length of the optional `confirm` action-diff `details` payload. Kept
-# deliberately small: the device parses each inbound JSON line in BLE IRQ
-# context (see cardputer_mcp.py), so the whole confirm line is held to roughly
-# the same envelope as the existing `ask` payload to stay well inside the
-# ~5 ms IRQ budget. ~320 chars still scrolls to ~8 lines of real diff/command.
-_CONFIRM_DETAILS_MAX = 320
+# deliberately small for TWO device limits: (1) the device parses each inbound
+# JSON line in BLE IRQ context (see cardputer_mcp.py), so the line must stay
+# well inside the ~5 ms IRQ budget; (2) the device's RX reassembly buffer is
+# 512 bytes — the full confirm line (cmd+id+agent+title≤64+flags+details) must
+# fit under it. Worst case here ≈ 195 B of envelope + 256 B details ≈ 451 B,
+# leaving comfortable margin. ~256 chars still scrolls to ~7 lines of diff.
+_CONFIRM_DETAILS_MAX = 256
 
 # When connection fails, suppress retries for this long so we don't
 # stall every tool call with a fresh 5-second scan when the device
@@ -630,7 +632,7 @@ async def confirm(
     supports it (fw >= 0.4.0) `details` is rendered in a scrollable box
     ABOVE the gesture, so the user approves *what they read*, not just an
     18-character title — the hardware-wallet model. Keep it to the
-    essential ~320 characters (it's truncated past that); strip noise so
+    essential ~256 characters (it's truncated past that); strip noise so
     the operation is legible on a 240×135 screen. NOTE: `details` is
     text you supply, so it adds *legibility of intent* — it is not a
     cryptographic proof, and the un-forgeable consent remains the
@@ -638,7 +640,7 @@ async def confirm(
     only, so the `title` must still stand on its own.
 
     Returns one of:
-      - 'confirmed' — user completed the ~3 s physical Y gesture
+      - 'confirmed (held <N> ms)' — user completed the ~3 s physical Y gesture
       - 'cancelled' — user pressed N or ESC on the device
       - 'timeout' — user did not respond within `timeout_s` seconds
       - 'unavailable: <reason>' — device not connected
@@ -655,6 +657,8 @@ async def confirm(
     where wrong = bad.
     """
     title = title[:64]
+    # Preserve internal whitespace (diffs/commands are indentation-sensitive),
+    # but cap the length. The strip()-check below decides whether to send it.
     details = str(details)[:_CONFIRM_DETAILS_MAX]
     if timeout_s < 5 or timeout_s > 120:
         return "error: timeout_s must be between 5 and 120"
@@ -665,10 +669,11 @@ async def confirm(
     # while the user is mid-hold.
     rpc_timeout = timeout_s + 10
     payload = {"title": title, "danger": True, "timeout_s": timeout_s}
-    # Send `details` only when non-empty so an empty string never bloats the
-    # BLE line. Old firmware ignores the field; new firmware renders it as a
+    # Send `details` only when it carries real content (strip()-check) so an
+    # empty/whitespace string never bloats the BLE line or renders as blank
+    # rows. Old firmware ignores the field; new firmware renders it as a
     # scrollable action diff (capability `confirm_details`).
-    if details:
+    if details.strip():
         payload["details"] = details
     result = await bridge.send(
         "confirm",
