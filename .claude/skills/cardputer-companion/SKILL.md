@@ -1,16 +1,16 @@
 ---
 name: cardputer-companion
-description: Use when the cardputer MCP tools (notify, ask, confirm) are available in the session, or the user mentions their Cardputer / handheld / "buzz me" / "page me". Governs runtime etiquette for the pocket device — mandates a physical confirm gesture before irreversible operations, buzzes the device on completion of long tasks, asks quick questions when blocked and the user is away from the keyboard, and formats all device output for the 240×135 LCD. This is the behavioral counterpart to the cardputer MCP server: the server is the hands, this skill is the manners. Trigger even when the user doesn't name the skill — if the `cardputer` MCP tools are registered, these rules are in force.
+description: Use when the cardputer MCP tools (notify, ask, confirm, show) are available in the session, or the user mentions their Cardputer / handheld / "buzz me" / "page me". Governs runtime etiquette for the pocket device — mandates a physical confirm gesture before irreversible operations (passing the real action diff as details), buzzes the device on completion of long tasks, asks quick questions when blocked and the user is away from the keyboard, shows ambient status for long work, and formats all device output for the 240×135 LCD. This is the behavioral counterpart to the cardputer MCP server: the server is the hands, this skill is the manners. Trigger even when the user doesn't name the skill — if the `cardputer` MCP tools are registered, these rules are in force.
 ---
 
 # Cardputer Companion
 
 The Cardputer is a credit-card-sized handheld the user carries in their pocket.
-It exposes three MCP tools over a BLE bridge — `notify`, `ask`, and `confirm` —
-provided by the `cardputer` MCP server in this repo (`mcp/server.py`). Those
-tools are the _hands_. This skill is the _manners_: it tells you **when** to
-reach for them and **how** to shape what you send, so the device stays useful
-instead of annoying.
+It exposes four MCP tools over a BLE bridge — `notify`, `ask`, `confirm`, and
+`show` — provided by the `cardputer` MCP server in this repo (`mcp/server.py`).
+Those tools are the _hands_. This skill is the _manners_: it tells you **when**
+to reach for them and **how** to shape what you send, so the device stays
+useful instead of annoying.
 
 **These rules apply no matter where you run.** The same tools reach the same
 device whether you're local Claude Code over loopback or a cloud Managed Agent /
@@ -25,8 +25,12 @@ token, so you can't misrepresent it) — keep your requests honest and legible.
 
 A buzz should mean something. The user is wearing this thing; every alert costs
 their attention. Earn each one. When in doubt, stay quiet and keep working — do
-not narrate progress to the device. Self-imposed restraint is the only throttle:
-do not assume the device will rate-limit you, because today it won't.
+not narrate progress to the device. The daemon now enforces a per-agent floor
+on non-critical `notify`s (a second non-`crit` buzz within ~60 s comes back
+`rate-limited` and never reaches the device), but treat that as a safety net,
+not a budget — keep self-imposed restraint as the real throttle. If you want a
+long task to stay visible without buzzing, use `show` (see below), not repeated
+`notify`s.
 
 ## 1. Confirm policy — mandatory, non-negotiable
 
@@ -53,6 +57,13 @@ Rules:
   user the device isn't reachable; let them decide how to proceed.
 - Keep the `title` to ~18 characters and declarative — the user must recognize
   the operation at a glance: `FORCE PUSH main`, `DROP customers`, `deploy prod`.
+- **Pass `details`** whenever you can: the _actual_ content being approved —
+  the real shell command, the SQL, a short diff hunk, or payee + amount. The
+  device renders it in a scrollable box above the gesture, so the user approves
+  _what they read_, not just the title (the hardware-wallet model). Keep it to
+  the essential ~256 chars and strip noise. It's text you supply, so it's
+  legibility of intent, not cryptographic proof — and the `title` must still
+  stand on its own (older firmware shows the title only).
 - Do not call `confirm` for routine yes/no decisions — that's what `ask` is for.
 
 ## 2. Proactive notify — quiet
@@ -78,6 +89,22 @@ ask in the chat instead — the device round-trip is slower and more intrusive.
 - Provide 2–4 short choices (each ≤ ~32 chars).
 - Keep the question to ~60 chars (wraps to two lines on the LCD).
 - On `timeout` or `cancelled`, fall back to chat — do not loop re-asking.
+
+## 3b. Ambient status — `show`, glanceable not noisy
+
+`cardputer.show(text, channel)` writes one **silent** line to the device's idle
+screen — no chirp, no screen takeover, not gated by DND. Use it to leave a live
+heartbeat of a long task the user can glance at, _instead of_ buzzing them:
+`building…`, `pytest 142/300`, `deploy ok`.
+
+- It is NOT a `notify`. Never use it for something the user must react to —
+  that's `notify` (or `confirm`). `show` is the status bar, not an alert.
+- Update at a human cadence — a few times across a task, not every step/token.
+- One line per `channel` (defaults to your agent label); keep `text` ≤ ~40
+  chars. The device keeps only the most recent few channels.
+- The pattern: a `show` heartbeat _while_ working, then one `notify` at the
+  very end (`tests green`). Don't replace the end-of-task `notify` with `show`.
+- `unavailable` / older firmware → just skip it; it's a nicety, never required.
 
 ## 4. Tiny-screen formatting
 

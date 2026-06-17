@@ -40,6 +40,7 @@ from bleak.exc import BleakError
 from mcp.server.fastmcp import Context, FastMCP
 
 from auth import label_for_authorization
+from ratelimit import MinIntervalLimiter
 
 
 # ---- protocol constants --------------------------------------------
@@ -59,6 +60,15 @@ NAME_PREFIX = "CardputerMCP_"
 SCAN_TIMEOUT_S = 5.0
 HELLO_TIMEOUT_S = 5.0
 DEFAULT_RPC_TIMEOUT_S = 30.0
+
+# Max length of the optional `confirm` action-diff `details` payload. Kept
+# deliberately small for TWO device limits: (1) the device parses each inbound
+# JSON line in BLE IRQ context (see cardputer_mcp.py), so the line must stay
+# well inside the ~5 ms IRQ budget; (2) the device's RX reassembly buffer is
+# 512 bytes — the full confirm line (cmd+id+agent+title≤64+flags+details) must
+# fit under it. Worst case here ≈ 195 B of envelope + 256 B details ≈ 451 B,
+# leaving comfortable margin. ~256 chars still scrolls to ~7 lines of diff.
+_CONFIRM_DETAILS_MAX = 256
 
 # When connection fails, suppress retries for this long so we don't
 # stall every tool call with a fresh 5-second scan when the device
@@ -419,6 +429,25 @@ class Bridge:
 bridge = Bridge()
 mcp = FastMCP("cardputer")
 
+
+def _notify_min_interval_s() -> float:
+    """Read the per-agent notify floor from the environment (seconds).
+
+    Default 60 s; set CARDPUTER_NOTIFY_MIN_INTERVAL_S=0 to disable. A
+    malformed value falls back to the default rather than crashing the daemon.
+    """
+    try:
+        return float(os.environ.get("CARDPUTER_NOTIFY_MIN_INTERVAL_S", "60"))
+    except ValueError:
+        return 60.0
+
+
+# Backstop for the "default to silence" etiquette the companion skill asks of
+# agents (see ratelimit.py). Keyed by the token-derived agent label so one
+# chatty agent can't bury the device or starve another agent's alerts. `crit`
+# notifies and the blocking tools (ask/confirm) bypass it at the call site.
+_notify_limiter = MinIntervalLimiter(_notify_min_interval_s())
+
 # Populated by build_http_app() in HTTP mode: maps bearer token -> agent
 # label. Read by _agent_label() so the device banner can show *which*
 # agent is asking. Empty in stdio mode (there's no HTTP request to read a
@@ -465,13 +494,23 @@ async def notify(
     is an urgent triple-beep. Prefer 'info' for most uses; reserve
     'crit' for things the user needs to react to within seconds.
 
-    Do not call this in rapid succession — agents that spam
-    notifications get muted by the device's per-agent rate limit
-    (roughly 1 per 60 s) in a later iteration. Returns 'shown',
-    'unavailable: <reason>', or 'failed: <reason>'.
+    Do not call this in rapid succession. The daemon enforces a per-agent
+    floor (default ~1 non-critical notify per 60 s, set by
+    CARDPUTER_NOTIFY_MIN_INTERVAL_S): a non-critical notify sent inside that
+    window returns 'rate-limited' without reaching the device. 'crit'
+    notifications always bypass the floor, so reserve 'crit' for things the
+    user must react to within seconds. Returns 'shown', 'rate-limited',
+    'dnd', 'unavailable: <reason>', or 'failed: <reason>'.
     """
     title = title[:64]
     body = body[:240]
+    agent = _agent_label(ctx)
+    # Per-agent backstop for the "default to silence" etiquette: a
+    # non-critical notify from an agent that just buzzed is dropped before it
+    # reaches the radio, so one chatty agent can't bury the device. `crit`
+    # always rings — a real emergency is exactly what the floor must not eat.
+    if urgency != "crit" and not _notify_limiter.allow(agent):
+        return "rate-limited"
     # Notify is non-blocking on the device, so the RPC should resolve
     # within milliseconds. 10 s is generous slack for radio + device
     # render — if it exceeds that something is wrong.
@@ -479,7 +518,7 @@ async def notify(
         "notify",
         {"title": title, "body": body, "urgency": urgency},
         rpc_timeout_s=10,
-        agent=_agent_label(ctx),
+        agent=agent,
     )
     if result.get("ok"):
         return "shown"
@@ -565,6 +604,7 @@ async def ask(
 async def confirm(
     ctx: Context,
     title: str,
+    details: str = "",
     timeout_s: int = 30,
 ) -> str:
     """Demand physical confirmation from the user before executing a
@@ -586,8 +626,21 @@ async def confirm(
     minute, use this instead of trusting an `ask` or your own
     assistant-message confirmation.
 
+    PASS `details` whenever you can. It is the *actual content* being
+    approved — the real shell command, the SQL statement, a short diff
+    hunk, the payee + amount, or the list of files. On firmware that
+    supports it (fw >= 0.4.0) `details` is rendered in a scrollable box
+    ABOVE the gesture, so the user approves *what they read*, not just an
+    18-character title — the hardware-wallet model. Keep it to the
+    essential ~256 characters (it's truncated past that); strip noise so
+    the operation is legible on a 240×135 screen. NOTE: `details` is
+    text you supply, so it adds *legibility of intent* — it is not a
+    cryptographic proof, and the un-forgeable consent remains the
+    physical hold. Older firmware ignores `details` and shows the title
+    only, so the `title` must still stand on its own.
+
     Returns one of:
-      - 'confirmed' — user completed the ~3 s physical Y gesture
+      - 'confirmed (held <N> ms)' — user completed the ~3 s physical Y gesture
       - 'cancelled' — user pressed N or ESC on the device
       - 'timeout' — user did not respond within `timeout_s` seconds
       - 'unavailable: <reason>' — device not connected
@@ -604,6 +657,9 @@ async def confirm(
     where wrong = bad.
     """
     title = title[:64]
+    # Preserve internal whitespace (diffs/commands are indentation-sensitive),
+    # but cap the length. The strip()-check below decides whether to send it.
+    details = str(details)[:_CONFIRM_DETAILS_MAX]
     if timeout_s < 5 or timeout_s > 120:
         return "error: timeout_s must be between 5 and 120"
 
@@ -612,9 +668,16 @@ async def confirm(
     # slack the host can race the device and report rpc-timeout
     # while the user is mid-hold.
     rpc_timeout = timeout_s + 10
+    payload = {"title": title, "danger": True, "timeout_s": timeout_s}
+    # Send `details` only when it carries real content (strip()-check) so an
+    # empty/whitespace string never bloats the BLE line or renders as blank
+    # rows. Old firmware ignores the field; new firmware renders it as a
+    # scrollable action diff (capability `confirm_details`).
+    if details.strip():
+        payload["details"] = details
     result = await bridge.send(
         "confirm",
-        {"title": title, "danger": True, "timeout_s": timeout_s},
+        payload,
         rpc_timeout_s=rpc_timeout,
         agent=_agent_label(ctx),
     )
@@ -629,6 +692,52 @@ async def confirm(
         return "cancelled"
     if result.get("timed_out"):
         return "timeout"
+    err = result.get("err", "unknown")
+    if err.startswith("unavailable"):
+        return err
+    return f"failed: {err}"
+
+
+@mcp.tool()
+async def show(
+    ctx: Context,
+    text: str,
+    channel: str = "",
+) -> str:
+    """Update a single ambient status line on the user's Cardputer.
+
+    Non-blocking, silent, and unobtrusive — unlike `notify`, this makes no
+    sound and never takes over the screen. It writes one line to a small
+    status area on the device's idle screen so the user can *glance* at their
+    pocket and see what you're doing right now ("running pytest", "wrote
+    auth.py", "idle ok"). Think of it as a status bar, not an alert.
+
+    Use it to keep a live heartbeat of a long task visible without buzzing the
+    user. Call it as your work progresses; each call replaces the previous
+    line for the same `channel`. `channel` is a short tag (defaults to your
+    agent label) so several agents can each own a line — the device keeps the
+    most recent few. Keep `text` to ~40 characters (the LCD is 240×135).
+
+    Because it's ambient it does NOT honor Do Not Disturb (there's nothing to
+    disturb: no sound, no takeover) and it is NOT rate-limited — but update at
+    a human-readable cadence, not on every token.
+
+    Returns 'shown', 'unavailable: <reason>' if the device isn't connected, or
+    'failed: <reason>' (e.g. older firmware that doesn't support `show`).
+    """
+    text = str(text)[:48]
+    agent = _agent_label(ctx)
+    # Channel defaults to the (unforgeable, token-derived) agent label so each
+    # agent owns its own status line without having to invent a tag.
+    channel = (str(channel).strip() or agent)[:16]
+    result = await bridge.send(
+        "show",
+        {"text": text, "channel": channel},
+        rpc_timeout_s=5,
+        agent=agent,
+    )
+    if result.get("ok"):
+        return "shown"
     err = result.get("err", "unknown")
     if err.startswith("unavailable"):
         return err

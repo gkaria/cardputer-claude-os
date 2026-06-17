@@ -118,20 +118,31 @@ reach. Three tools land on first connect:
 - `cardputer.notify(title, body, urgency)` — flash a banner on the
   device and chirp the speaker. Urgency colors the header
   (info=dark, warn=yellow, crit=red) and varies the beep pattern.
-  Returns once the banner is shown; auto-clears after 5 s.
+  Returns once the banner is shown; auto-clears after 5 s. A
+  per-agent floor (default ~1 non-`crit` notify per 60 s) drops
+  spammy banners with `rate-limited`; `crit` always rings.
 - `cardputer.ask(question, choices, timeout_s)` — show a numbered
   multiple-choice question; the user presses 1–4 on the QWERTY;
   the chosen string returns to the agent. Blocks the agent until
   the user answers, ESCs, or `timeout_s` elapses.
-- `cardputer.confirm(title, timeout_s)` — display a red danger
-  banner and demand a physical gesture before resolving as
+- `cardputer.confirm(title, details, timeout_s)` — display a red
+  danger banner and demand a physical gesture before resolving as
   `confirmed`. The whole point is that a prompt injection cannot
   synthesize a sustained physical keypress. Reserve this for
   irreversible operations (deploys, force pushes, DROP TABLE,
-  charges, etc.). On the current firmware the gesture is **rapid Y
-  taps** (the screen says "TAP Y fast for 3s") because the keyboard
-  driver has no auto-repeat — see _Known limitations_ in
+  charges, etc.). Pass `details` — the **actual** command / SQL /
+  diff / payee — and the device renders it in a **scrollable action
+  diff above the gesture**, so the user approves _what they read_,
+  not just an 18-char title (the hardware-wallet model). On the
+  current firmware the gesture is **rapid Y taps** (the screen says
+  "TAP Y fast for 3s") because the keyboard driver has no
+  auto-repeat — see _Known limitations_ in
   [`mcp/README.md`](mcp/README.md).
+- `cardputer.show(text, channel)` — write one **ambient status
+  line** to the device's idle screen (silent, non-blocking, ignores
+  DND). Glance at your pocket to see what a long task is doing
+  (`running pytest`, `wrote auth.py`, `idle`); each `channel` gets
+  its own line so several agents can share the screen.
 
 The whole stack is local — stdio MCP between your client and the
 host-side `bleak` bridge, then BLE-GATT to the device. No cloud
