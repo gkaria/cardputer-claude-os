@@ -40,6 +40,7 @@ from bleak.exc import BleakError
 from mcp.server.fastmcp import Context, FastMCP
 
 from auth import label_for_authorization
+from ratelimit import MinIntervalLimiter
 
 
 # ---- protocol constants --------------------------------------------
@@ -419,6 +420,25 @@ class Bridge:
 bridge = Bridge()
 mcp = FastMCP("cardputer")
 
+
+def _notify_min_interval_s() -> float:
+    """Read the per-agent notify floor from the environment (seconds).
+
+    Default 60 s; set CARDPUTER_NOTIFY_MIN_INTERVAL_S=0 to disable. A
+    malformed value falls back to the default rather than crashing the daemon.
+    """
+    try:
+        return float(os.environ.get("CARDPUTER_NOTIFY_MIN_INTERVAL_S", "60"))
+    except ValueError:
+        return 60.0
+
+
+# Backstop for the "default to silence" etiquette the companion skill asks of
+# agents (see ratelimit.py). Keyed by the token-derived agent label so one
+# chatty agent can't bury the device or starve another agent's alerts. `crit`
+# notifies and the blocking tools (ask/confirm) bypass it at the call site.
+_notify_limiter = MinIntervalLimiter(_notify_min_interval_s())
+
 # Populated by build_http_app() in HTTP mode: maps bearer token -> agent
 # label. Read by _agent_label() so the device banner can show *which*
 # agent is asking. Empty in stdio mode (there's no HTTP request to read a
@@ -465,13 +485,23 @@ async def notify(
     is an urgent triple-beep. Prefer 'info' for most uses; reserve
     'crit' for things the user needs to react to within seconds.
 
-    Do not call this in rapid succession — agents that spam
-    notifications get muted by the device's per-agent rate limit
-    (roughly 1 per 60 s) in a later iteration. Returns 'shown',
-    'unavailable: <reason>', or 'failed: <reason>'.
+    Do not call this in rapid succession. The daemon enforces a per-agent
+    floor (default ~1 non-critical notify per 60 s, set by
+    CARDPUTER_NOTIFY_MIN_INTERVAL_S): a non-critical notify sent inside that
+    window returns 'rate-limited' without reaching the device. 'crit'
+    notifications always bypass the floor, so reserve 'crit' for things the
+    user must react to within seconds. Returns 'shown', 'rate-limited',
+    'dnd', 'unavailable: <reason>', or 'failed: <reason>'.
     """
     title = title[:64]
     body = body[:240]
+    agent = _agent_label(ctx)
+    # Per-agent backstop for the "default to silence" etiquette: a
+    # non-critical notify from an agent that just buzzed is dropped before it
+    # reaches the radio, so one chatty agent can't bury the device. `crit`
+    # always rings — a real emergency is exactly what the floor must not eat.
+    if urgency != "crit" and not _notify_limiter.allow(agent):
+        return "rate-limited"
     # Notify is non-blocking on the device, so the RPC should resolve
     # within milliseconds. 10 s is generous slack for radio + device
     # render — if it exceeds that something is wrong.
@@ -479,7 +509,7 @@ async def notify(
         "notify",
         {"title": title, "body": body, "urgency": urgency},
         rpc_timeout_s=10,
-        agent=_agent_label(ctx),
+        agent=agent,
     )
     if result.get("ok"):
         return "shown"

@@ -1,9 +1,9 @@
 """Integration tests for the streamable-HTTP transport wiring.
 
 These exercise the real FastMCP app produced by server.build_http_app()
-through a Starlette TestClient — no BLE device is touched because we only
-hit auth + the MCP handshake + tools/list (never a tool body, which is
-what would drive the Bridge).
+through a Starlette TestClient. No BLE device is touched: auth + the MCP
+handshake + tools/list need no Bridge, and the tool-body tests below
+monkeypatch server.bridge.send so the tool logic runs without a radio.
 """
 
 import json
@@ -12,6 +12,7 @@ import pytest
 from starlette.testclient import TestClient
 
 import server
+from ratelimit import MinIntervalLimiter
 
 _INIT = {
     "jsonrpc": "2.0",
@@ -169,3 +170,70 @@ def test_notify_returns_dnd_when_device_suppresses(client, monkeypatch):
             if c.get("type") == "text":
                 texts.append(c["text"])
     assert "dnd" in texts, texts
+
+
+def _call_texts(client, headers, name, arguments, call_id):
+    """Call one tool and return the list of text-content strings it produced."""
+    r = client.post(
+        "/mcp",
+        headers=headers,
+        json={
+            "jsonrpc": "2.0",
+            "id": call_id,
+            "method": "tools/call",
+            "params": {"name": name, "arguments": arguments},
+        },
+    )
+    assert r.status_code == 200, r.text
+    texts = []
+    for obj in _sse_objects(r.text):
+        for c in obj.get("result", {}).get("content", []):
+            if c.get("type") == "text":
+                texts.append(c["text"])
+    return texts
+
+
+def test_notify_rate_limited_for_same_agent(client, monkeypatch):
+    # Fresh limiter so this test doesn't depend on (or pollute) the
+    # module-level singleton. Two calls in one test run land well inside the
+    # 60s window on the real monotonic clock.
+    monkeypatch.setattr(server, "_notify_limiter", MinIntervalLimiter(60))
+
+    reached = []
+
+    async def fake_send(cmd, payload, rpc_timeout_s=30.0, agent="mcp-client"):
+        reached.append((agent, payload.get("urgency")))
+        return {"ack": cmd, "ok": True}
+
+    monkeypatch.setattr(server.bridge, "send", fake_send)
+    h = _init_session(client, "tok")  # token tok -> claude-code
+
+    assert "shown" in _call_texts(client, h, "notify", {"title": "one"}, 10)
+    assert "rate-limited" in _call_texts(client, h, "notify", {"title": "two"}, 11)
+    # crit always bypasses the floor, even while the agent is throttled.
+    crit = _call_texts(
+        client, h, "notify", {"title": "fire", "urgency": "crit"}, 12
+    )
+    assert "shown" in crit, crit
+
+    # Only the two allowed notifies reached the bridge; the rate-limited one
+    # never hit the radio.
+    assert reached == [("claude-code", "info"), ("claude-code", "crit")], reached
+
+
+def test_notify_rate_limit_independent_per_agent(client, monkeypatch):
+    monkeypatch.setattr(server, "_notify_limiter", MinIntervalLimiter(60))
+
+    async def fake_send(cmd, payload, rpc_timeout_s=30.0, agent="mcp-client"):
+        return {"ack": cmd, "ok": True}
+
+    monkeypatch.setattr(server.bridge, "send", fake_send)
+
+    h_local = _init_session(client, "tok")  # claude-code
+    h_cloud = _init_session(client, "cloud")  # managed-agent
+
+    assert "shown" in _call_texts(client, h_local, "notify", {"title": "a"}, 20)
+    # Different agent -> own bucket -> still allowed.
+    assert "shown" in _call_texts(client, h_cloud, "notify", {"title": "b"}, 21)
+    # Same agent again -> throttled.
+    assert "rate-limited" in _call_texts(client, h_local, "notify", {"title": "c"}, 22)
