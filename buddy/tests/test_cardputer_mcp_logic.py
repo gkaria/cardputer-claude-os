@@ -327,6 +327,52 @@ def test_confirm_y_tap_does_not_advance_via_scroll_keys():
     assert app._y_held_since_ms is None  # scrolling never starts the hold
 
 
+# ---- App: heartbeat sender -----------------------------------------------
+
+
+def test_build_heartbeat_has_dnd_and_uptime():
+    app = _fresh_app()
+    app.dnd = True
+    ft = _M["_faketime"]
+    ft._advance(7000)
+    hb = app._build_heartbeat(ft.ticks_ms())
+    assert hb["event"] == "heartbeat"
+    assert hb["dnd"] is True
+    assert hb["uptime"] == 7  # 7000 ms // 1000
+    # The stub M5 has no Power API, so battery is omitted and disabled.
+    assert "bat" not in hb
+    assert app._bat_ok is False
+
+
+def test_heartbeat_not_sent_when_disconnected():
+    app = _fresh_app()
+    app.ble_connected = False
+    sent = []
+    app.ble.send = lambda p: sent.append(p) or True
+    ft = _M["_faketime"]
+    ft._advance(_M["_HEARTBEAT_INTERVAL_MS"] + 1000)
+    app._maybe_send_heartbeat(ft.ticks_ms())
+    assert sent == []
+
+
+def test_heartbeat_cadence_when_connected():
+    app = _fresh_app()
+    app.ble_connected = True
+    sent = []
+    app.ble.send = lambda p: sent.append(p) or True
+    ft = _M["_faketime"]
+    interval = _M["_HEARTBEAT_INTERVAL_MS"]
+    ft._advance(interval - 1000)
+    app._maybe_send_heartbeat(ft.ticks_ms())
+    assert sent == [], "not due yet"
+    ft._advance(1000)
+    app._maybe_send_heartbeat(ft.ticks_ms())
+    assert len(sent) == 1 and sent[0]["event"] == "heartbeat"
+    # Immediately after a send it's not due again.
+    app._maybe_send_heartbeat(ft.ticks_ms())
+    assert len(sent) == 1
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     failures = 0
