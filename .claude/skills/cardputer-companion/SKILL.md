@@ -130,6 +130,18 @@ screen). When they have:
   because the user is asleep, that's the system working: **abort**, don't
   proceed.
 
+## 6. Check before you interrupt — `device_status`
+
+`device_status()` is a **read-only, passive** probe (no buzz, no radio wake):
+it reports `online`/`offline`, `dnd`, firmware `caps`, uptime, and battery.
+Use it when it would change your behavior — e.g. before starting a long
+unattended job ("will I even be able to page them when it's done?"), or before
+a non-urgent `notify` when you're unsure. If it says `offline` or `dnd=on`,
+prefer staying quiet and falling back to chat over firing a call that bounces.
+Don't poll it in a loop; it's a check, not a heartbeat for you to watch. To
+_actively_ reach the device, just call `notify`/`ask`/`confirm` — they connect
+on demand and fail closed.
+
 ## When the device is unavailable
 
 All three tools return `"unavailable: <reason>"` when the Cardputer is off or out

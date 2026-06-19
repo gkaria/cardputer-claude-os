@@ -59,7 +59,7 @@ _RX_CHAR = (RX_UUID, _FLAG_WRITE | _FLAG_WRITE_NR)
 _TX_CHAR = (TX_UUID, _FLAG_READ | _FLAG_NOTIFY)
 _SVC = (SERVICE_UUID, (_RX_CHAR, _TX_CHAR))
 
-_FW_VERSION = "0.4.0"
+_FW_VERSION = "0.4.1"
 # Capabilities advertised in `hello`. The host gates tool calls on these:
 #   confirm_details — confirm renders an agent-supplied scrollable action diff
 #   show            — ambient single-line status updates on the idle screen
@@ -106,6 +106,11 @@ _H = 135
 # idle status display, in ms. Long enough to read a 3-line body
 # comfortably, short enough that a stale notification doesn't loiter.
 _NOTIFY_LINGER_MS = 5000
+
+# How often the device emits a `heartbeat` event (dnd / uptime / battery) to
+# the host while connected. Matches the 10 s cadence the protocol documents
+# and the Buddy app uses, so the host's "30 s silence = gone" heuristic holds.
+_HEARTBEAT_INTERVAL_MS = 10000
 
 # Ambient `show` status: how many channels we keep (newest-first, one line
 # per channel) and how wide each wrapped detail/status line is at size-1
@@ -503,6 +508,13 @@ class App:
         self._dirty = True
         self._pending_chirp = None  # urgency string or None
 
+        # Heartbeat cadence + telemetry state. _bat_ok starts True and flips
+        # off the first time a battery read raises, so a build without a usable
+        # Power API costs one failed read, not one every 10 s forever.
+        self._boot_ms = time.ticks_ms()
+        self._last_hb_ms = self._boot_ms
+        self._bat_ok = True
+
         self.ble = MCPBLE(self._on_command, self._on_state)
 
     # --- callbacks from BLE (IRQ context) --------------------------
@@ -869,6 +881,39 @@ class App:
             return True
         return False
 
+    # --- heartbeat (main-loop context) -----------------------------
+
+    def _build_heartbeat(self, now):
+        """Build the heartbeat event: always the reliable signals (dnd +
+        uptime); battery only as a guarded best-effort (omitted if the build
+        has no usable Power API — same reason Buddy stubs battery)."""
+        hb = {
+            "event": "heartbeat",
+            "dnd": self.dnd,
+            "uptime": time.ticks_diff(now, self._boot_ms) // 1000,
+        }
+        if self._bat_ok:
+            bat = _read_battery()
+            if bat is None:
+                self._bat_ok = False  # don't keep retrying a missing API
+            else:
+                hb["bat"] = bat
+        return hb
+
+    def _maybe_send_heartbeat(self, now):
+        """Emit a heartbeat every _HEARTBEAT_INTERVAL_MS while connected.
+
+        Runs in main-loop (not IRQ) context, so the gatts_notify is safe here.
+        Only fires when connected; on reconnect the first heartbeat goes out
+        promptly since _last_hb_ms is older than the interval.
+        """
+        if not self.ble_connected:
+            return
+        if time.ticks_diff(now, self._last_hb_ms) < _HEARTBEAT_INTERVAL_MS:
+            return
+        self._last_hb_ms = now
+        self.ble.send(self._build_heartbeat(now))
+
     # --- main-loop tick --------------------------------------------
 
     def tick(self):
@@ -880,6 +925,7 @@ class App:
 
         # Timers.
         now = time.ticks_ms()
+        self._maybe_send_heartbeat(now)
         if self.state == "notify":
             if time.ticks_diff(self.notify_expires_at, now) <= 0:
                 self.state = "idle"
@@ -1395,6 +1441,31 @@ def _wrap_detail_lines(text, width=_DETAIL_WRAP, max_lines=40):
         if len(out) >= max_lines:
             break
     return out[:max_lines]
+
+
+def _read_battery():
+    """Best-effort battery read as ``{"pct": int, "usb": bool}`` or ``None``.
+
+    M5's Power API varies across UIFlow builds (it's why Buddy stubs battery),
+    so every access is guarded and any failure yields ``None`` — the caller
+    then drops battery from the heartbeat and stops retrying. Never raises.
+    """
+    try:
+        power = M5.Power
+    except Exception:
+        return None
+    try:
+        pct = int(power.getBatteryLevel())
+    except Exception:
+        return None
+    if pct < 0 or pct > 100:
+        return None
+    usb = False
+    try:
+        usb = bool(power.isCharging())
+    except Exception:
+        usb = False
+    return {"pct": pct, "usb": usb}
 
 
 def _chirp(urgency):

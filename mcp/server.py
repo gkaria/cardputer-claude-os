@@ -136,6 +136,13 @@ class Bridge:
         self.client: Optional[BleakClient] = None
         self.hello: Optional[dict] = None
 
+        # Latest device heartbeat (dnd / uptime / battery) and when we saw it,
+        # cached so the read-only `device_status` tool can report device state
+        # without a round-trip. Cleared on disconnect so stale state can't
+        # outlive the link.
+        self.last_heartbeat: Optional[dict] = None
+        self.last_heartbeat_at: Optional[float] = None
+
         self._rx_buf = bytearray()
         self._pending: dict[str, asyncio.Future] = {}
         self._connect_lock = asyncio.Lock()
@@ -292,6 +299,10 @@ class Bridge:
         _log("BLE disconnected")
         self.hello = None
         self._hello_event.clear()
+        # Drop cached telemetry so device_status can't report a stale dnd /
+        # battery for a device that's no longer on the other end of the link.
+        self.last_heartbeat = None
+        self.last_heartbeat_at = None
         for mid, fut in list(self._pending.items()):
             if not fut.done():
                 fut.set_exception(
@@ -326,9 +337,12 @@ class Bridge:
                 self.hello = msg
                 self._hello_event.set()
             elif ev == "heartbeat":
-                # Heartbeats are advisory in iter 2. Iter 3+ will use
-                # them for battery display and DND-state propagation.
-                pass
+                # Device liveness + DND/battery telemetry (fw 0.4.1+). Cache it
+                # so `device_status` can report without waking the radio. A
+                # pre-0.4.1 device simply never sends these, and the tool falls
+                # back to connection + hello info.
+                self.last_heartbeat = msg
+                self.last_heartbeat_at = time.monotonic()
             else:
                 _log(f"unknown event: {ev}")
             return
@@ -742,6 +756,65 @@ async def show(
     if err.startswith("unavailable"):
         return err
     return f"failed: {err}"
+
+
+@mcp.tool()
+async def device_status() -> str:
+    """Report whether the user's Cardputer is reachable and its current state.
+
+    READ-ONLY and passive: returns the bridge's *cached* view — it does NOT
+    wake the radio, scan, or block. Call it to decide whether to interrupt the
+    user: if the device is offline or in Do Not Disturb, prefer staying quiet
+    (or fall back to chat) rather than firing a `notify`/`ask` that will bounce.
+    Also handy to learn which tools the connected firmware supports (`caps`).
+
+    Returns a one-line summary, e.g.
+      'online; dnd=off; fw=0.4.1; caps=notify,ask,confirm,confirm_details,show;
+       uptime=142s; battery=87%; heartbeat 3s ago'
+    or 'offline (device off, out of BLE range, or not yet connected this
+    session)'.
+
+    The view is only as fresh as the last heartbeat (~10 s) or the last tool
+    call — to *actively* reach the device, just call notify/ask/confirm, which
+    connect on demand and fail closed if it's unreachable.
+    """
+    connected = bool(
+        bridge.client and bridge.client.is_connected and bridge.hello
+    )
+    if not connected:
+        return (
+            "offline (device off, out of BLE range, or not yet connected "
+            "this session)"
+        )
+
+    hello = bridge.hello or {}
+    hb = bridge.last_heartbeat or {}
+    parts = ["online"]
+
+    dnd = hb.get("dnd")
+    parts.append("dnd=" + ("on" if dnd else "off") if dnd is not None else "dnd=unknown")
+
+    ver = hello.get("version")
+    if ver:
+        parts.append("fw=" + str(ver))
+    caps = hello.get("caps") or []
+    if caps:
+        parts.append("caps=" + ",".join(str(c) for c in caps))
+
+    up = hb.get("uptime")
+    if isinstance(up, (int, float)):
+        parts.append("uptime={}s".format(int(up)))
+
+    bat = hb.get("bat")
+    if isinstance(bat, dict) and isinstance(bat.get("pct"), (int, float)):
+        charging = " (charging)" if bat.get("usb") else ""
+        parts.append("battery={}%{}".format(int(bat["pct"]), charging))
+
+    if bridge.last_heartbeat_at is not None:
+        age = max(0, int(time.monotonic() - bridge.last_heartbeat_at))
+        parts.append("heartbeat {}s ago".format(age))
+
+    return "; ".join(parts)
 
 
 # ---- HTTP transport (the cloud-bridge path, via an MCP tunnel) ------
