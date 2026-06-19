@@ -98,3 +98,19 @@ def test_uncapped_command_short_circuits_without_writing():
     assert result["ok"] is False
     assert "does not advertise 'show'" in result["err"]
     assert wrote == [], "uncapped command must not reach the radio"
+
+
+def test_dispatch_caches_and_clears_heartbeat():
+    """A device heartbeat is cached for device_status; a disconnect clears it
+    so stale dnd/battery can't outlive the link."""
+    bridge = server.Bridge()
+    assert bridge.last_heartbeat is None
+
+    bridge._dispatch({"event": "heartbeat", "dnd": True, "uptime": 42})
+    assert bridge.last_heartbeat == {"event": "heartbeat", "dnd": True, "uptime": 42}
+    assert bridge.last_heartbeat_at is not None
+
+    # Simulate the BLE disconnect callback.
+    bridge._on_disconnect_sync(None)
+    assert bridge.last_heartbeat is None
+    assert bridge.last_heartbeat_at is None

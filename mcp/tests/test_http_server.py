@@ -117,7 +117,7 @@ def test_initialize_and_tools_list_with_bearer(client):
     for obj in _sse_objects(tl.text):
         for tool in obj.get("result", {}).get("tools", []):
             names.add(tool["name"])
-    assert {"notify", "ask", "confirm", "show"} <= names, names
+    assert {"notify", "ask", "confirm", "show", "device_status"} <= names, names
 
 
 def test_notify_threads_agent_label_from_token(client, monkeypatch):
@@ -374,3 +374,50 @@ def test_show_whitespace_channel_falls_back_to_agent(client, monkeypatch):
     h = _init_session(client, "tok")  # claude-code
     _call_texts(client, h, "show", {"text": "hi", "channel": "   "}, 44)
     assert captured["payload"]["channel"] == "claude-code"
+
+
+class _FakeConnectedClient:
+    is_connected = True
+
+
+def test_device_status_offline_when_no_client(client, monkeypatch):
+    monkeypatch.setattr(server.bridge, "client", None)
+    monkeypatch.setattr(server.bridge, "hello", None)
+    h = _init_session(client, "tok")
+    texts = _call_texts(client, h, "device_status", {}, 50)
+    assert any(t.startswith("offline") for t in texts), texts
+
+
+def test_device_status_online_reports_state(client, monkeypatch):
+    monkeypatch.setattr(server.bridge, "client", _FakeConnectedClient())
+    monkeypatch.setattr(
+        server.bridge,
+        "hello",
+        {"version": "0.4.1", "caps": ["notify", "ask", "confirm", "show"]},
+    )
+    monkeypatch.setattr(
+        server.bridge,
+        "last_heartbeat",
+        {"event": "heartbeat", "dnd": True, "uptime": 142, "bat": {"pct": 87, "usb": False}},
+    )
+    monkeypatch.setattr(server.bridge, "last_heartbeat_at", 0.0)
+    h = _init_session(client, "tok")
+    texts = _call_texts(client, h, "device_status", {}, 51)
+    blob = " ".join(texts)
+    assert "online" in blob, blob
+    assert "dnd=on" in blob, blob
+    assert "fw=0.4.1" in blob, blob
+    assert "uptime=142s" in blob, blob
+    assert "battery=87%" in blob, blob
+
+
+def test_device_status_dnd_unknown_without_heartbeat(client, monkeypatch):
+    # Connected but pre-0.4.1 firmware (no heartbeat yet): dnd is unknown,
+    # not silently reported as "off".
+    monkeypatch.setattr(server.bridge, "client", _FakeConnectedClient())
+    monkeypatch.setattr(server.bridge, "hello", {"version": "0.3.0", "caps": ["notify"]})
+    monkeypatch.setattr(server.bridge, "last_heartbeat", None)
+    monkeypatch.setattr(server.bridge, "last_heartbeat_at", None)
+    h = _init_session(client, "tok")
+    texts = _call_texts(client, h, "device_status", {}, 52)
+    assert "dnd=unknown" in " ".join(texts), texts
