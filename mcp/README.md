@@ -20,6 +20,7 @@ The host-side bridge speaks Bluetooth Low Energy via `bleak` to the
 | `ask(question, choices, timeout_s)`  | ✅ blocks on QWERTY input        | ✅ DND awareness                   | —                                   |
 | `confirm(title, details, timeout_s)` | —                                | ✅ TAP-Y-fast 3 s physical gesture | ✅ scrollable action diff (details) |
 | `show(text, channel)`                | —                                | —                                  | ✅ ambient line on LCD              |
+| `device_status()`                    | —                                | —                                  | ✅ read-only reachability/DND/caps  |
 | `dictate(prompt, max_seconds)`       | —                                | —                                  | mic → Worker/Whisper → text         |
 
 `confirm` is the differentiator. It demands a physical, sustained
@@ -244,6 +245,10 @@ but its gesture is less polished than the brand promised.
       scrollable action diff (the real command / SQL / diff / payee) above the
       hold-Y gesture (fw `0.4.0`, cap `confirm_details`) — you approve _what
       you read_, the hardware-wallet model.
+- [x] **situational awareness**: the device emits `heartbeat` telemetry
+      (dnd / uptime / best-effort battery, fw `0.4.1`) and a read-only
+      `device_status` tool lets agents check reachability + DND + caps before
+      deciding to interrupt — instead of firing a notify that just bounces.
 - [ ] iter 6: inverse direction — programmable launcher buttons
       that fire Managed Agents tasks
 - [ ] later: **trusted daemon-computed** action diffs (so the agent can't

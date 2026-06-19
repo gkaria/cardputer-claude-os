@@ -8,8 +8,9 @@ rates, and different MCP-client expectations.
 
 ## Status
 
-Implemented through iter 5, plus the iter-4 `show` line and a
-verified-approval `details` field on `confirm` (firmware `0.4.0`).
+Implemented through iter 5, plus the iter-4 `show` line, a verified-approval
+`details` field on `confirm` (firmware `0.4.0`), and device→host `heartbeat`
+telemetry powering the host-side `device_status` tool (firmware `0.4.1`).
 `notify`, `ask`, `confirm`, and `show` work end-to-end over BLE (device
 `cardputer_mcp.py` ↔ host `mcp/server.py`). The host now speaks MCP over
 **two transports** to the same `Bridge` and the same device:
@@ -90,27 +91,27 @@ so it can't be forged. The device:
 
 ## Outbound (device → host)
 
-| shape                                                                                                         | when                                                                                                                                                         |
-| ------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `{"event":"hello","version":"0.4.0","name":"...","caps":["notify","ask","confirm","confirm_details","show"]}` | Once, ~1.5 s after the BLE central subscribes to TX (delay is to let the central settle its CCCD write). `caps` lists tools/features this firmware supports. |
-| `{"event":"heartbeat","bat":{...},"rssi":...}`                                                                | Every ~10 s while connected, mirroring Buddy's cadence.                                                                                                      |
-| `{"ack":"<cmd>","id":"...","ok":true}`                                                                        | Generic success ack — for `notify`, `show`, `ping`, `cancel`.                                                                                                |
-| `{"ack":"<cmd>","id":"...","ok":false,"err":"..."}`                                                           | Generic failure ack. `err` is a short stable string.                                                                                                         |
-| `{"ack":"ask","id":"...","pending":true}`                                                                     | Immediate ack for `ask` / `confirm` indicating the device received the request and is awaiting user input.                                                   |
-| `{"ack":"ask","id":"...","ok":true,"choice":"..."}`                                                           | Resolution: user picked a choice.                                                                                                                            |
-| `{"ack":"ask","id":"...","ok":false,"timed_out":true}`                                                        | Resolution: `timeout_s` elapsed.                                                                                                                             |
-| `{"ack":"ask","id":"...","ok":false,"dnd":true}`                                                              | Resolution: device was in do-not-disturb mode.                                                                                                               |
-| `{"ack":"ask","id":"...","ok":false,"cancelled":true}`                                                        | Resolution: host sent `cancel` for this id, or user pressed ESC.                                                                                             |
-| `{"ack":"confirm","id":"...","ok":true,"confirmed":true,"hold_ms":N}`                                         | Resolution: user held Y for ≥ 3 s. `hold_ms` is the measured hold duration.                                                                                  |
-| `{"ack":"confirm","id":"...","ok":false,"cancelled":true}`                                                    | Resolution: user pressed N or ESC.                                                                                                                           |
-| `{"ack":"confirm","id":"...","ok":false,"timed_out":true}`                                                    | Resolution: `timeout_s` elapsed before the user could complete the hold.                                                                                     |
+| shape                                                                                                         | when                                                                                                                                                                                                          |
+| ------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `{"event":"hello","version":"0.4.1","name":"...","caps":["notify","ask","confirm","confirm_details","show"]}` | Once, ~1.5 s after the BLE central subscribes to TX (delay is to let the central settle its CCCD write). `caps` lists tools/features this firmware supports.                                                  |
+| `{"event":"heartbeat","dnd":bool,"uptime":N,"bat":{...}}`                                                     | Every ~10 s while connected (fw 0.4.1+). Cached by the host for the read-only `device_status` tool. `bat` is best-effort (omitted on builds without a usable Power API); `rssi` is not sent by this firmware. |
+| `{"ack":"<cmd>","id":"...","ok":true}`                                                                        | Generic success ack — for `notify`, `show`, `ping`, `cancel`.                                                                                                                                                 |
+| `{"ack":"<cmd>","id":"...","ok":false,"err":"..."}`                                                           | Generic failure ack. `err` is a short stable string.                                                                                                                                                          |
+| `{"ack":"ask","id":"...","pending":true}`                                                                     | Immediate ack for `ask` / `confirm` indicating the device received the request and is awaiting user input.                                                                                                    |
+| `{"ack":"ask","id":"...","ok":true,"choice":"..."}`                                                           | Resolution: user picked a choice.                                                                                                                                                                             |
+| `{"ack":"ask","id":"...","ok":false,"timed_out":true}`                                                        | Resolution: `timeout_s` elapsed.                                                                                                                                                                              |
+| `{"ack":"ask","id":"...","ok":false,"dnd":true}`                                                              | Resolution: device was in do-not-disturb mode.                                                                                                                                                                |
+| `{"ack":"ask","id":"...","ok":false,"cancelled":true}`                                                        | Resolution: host sent `cancel` for this id, or user pressed ESC.                                                                                                                                              |
+| `{"ack":"confirm","id":"...","ok":true,"confirmed":true,"hold_ms":N}`                                         | Resolution: user held Y for ≥ 3 s. `hold_ms` is the measured hold duration.                                                                                                                                   |
+| `{"ack":"confirm","id":"...","ok":false,"cancelled":true}`                                                    | Resolution: user pressed N or ESC.                                                                                                                                                                            |
+| `{"ack":"confirm","id":"...","ok":false,"timed_out":true}`                                                    | Resolution: `timeout_s` elapsed before the user could complete the hold.                                                                                                                                      |
 
 ### hello event body
 
 ```
 {
   "event": "hello",
-  "version": "0.4.0",      # firmware version of cardputer_mcp.py
+  "version": "0.4.1",      # firmware version of cardputer_mcp.py
   "name":    "Pip",        # device-set display name (default: "Cardputer")
   "caps":    ["notify", "ask", "confirm", "confirm_details", "show"],  # tool/feature surface this build implements
   "model":   "cardputer-adv",     # or "cardputer" for non-Adv
@@ -120,16 +121,17 @@ so it can't be forged. The device:
 
 ### heartbeat body
 
-Mirrors the Buddy heartbeat status payload so device-side state code
-can be shared between apps:
+Sent every ~10 s while connected (fw 0.4.1+); the host caches the latest one
+for the `device_status` tool. `dnd` + `uptime` are always present; `bat` is a
+best-effort read (omitted when the build has no usable Power API). `rssi` is
+documented for parity with Buddy but is **not** emitted by `cardputer_mcp.py`.
 
 ```
 {
   "event":  "heartbeat",
-  "bat":    {"pct": 0|25|50|75|100, "usb": bool},
-  "rssi":   -57,           # signed dBm; useful for debugging fade-outs
-  "uptime": 142,           # seconds since this app booted
-  "dnd":    false          # do-not-disturb state
+  "dnd":    false,         # do-not-disturb state (always present)
+  "uptime": 142,           # seconds since this app booted (always present)
+  "bat":    {"pct": 0..100, "usb": bool}   # best-effort; omitted if unavailable
 }
 ```
 

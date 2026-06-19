@@ -143,6 +143,11 @@ reach. Three tools land on first connect:
   DND). Glance at your pocket to see what a long task is doing
   (`running pytest`, `wrote auth.py`, `idle`); each `channel` gets
   its own line so several agents can share the screen.
+- `cardputer.device_status()` — a **read-only** check of whether the
+  device is reachable and its state (`online; dnd=off; fw=0.4.1;
+caps=…; battery=87%`). Passive (no radio wake), so an agent can ask
+  "is my human reachable / heads-down?" before deciding to interrupt,
+  powered by a ~10 s device heartbeat.
 
 The whole stack is local — stdio MCP between your client and the
 host-side `bleak` bridge, then BLE-GATT to the device. No cloud
