@@ -12,7 +12,7 @@ status — all without the user needing to refocus to their laptop.
 ## Status — iteration 3 (confirm gesture; the 2FA-for-AI moment)
 
 The host-side bridge speaks Bluetooth Low Energy via `bleak` to the
-`cardputer_mcp.py` device app. Three tools work end-to-end:
+`cardputer_mcp.py` device app. These tools work end-to-end:
 
 | Tool                                 | iter 2                           | iter 3                             | iter 4 +                            |
 | ------------------------------------ | -------------------------------- | ---------------------------------- | ----------------------------------- |
@@ -20,6 +20,7 @@ The host-side bridge speaks Bluetooth Low Energy via `bleak` to the
 | `ask(question, choices, timeout_s)`  | ✅ blocks on QWERTY input        | ✅ DND awareness                   | —                                   |
 | `confirm(title, details, timeout_s)` | —                                | ✅ TAP-Y-fast 3 s physical gesture | ✅ scrollable action diff (details) |
 | `show(text, channel)`                | —                                | —                                  | ✅ ambient line on LCD              |
+| `progress(label, percent, channel)`  | —                                | —                                  | ✅ ambient 0–100% bar (fw 0.4.2)    |
 | `device_status()`                    | —                                | —                                  | ✅ read-only reachability/DND/caps  |
 | `dictate(prompt, max_seconds)`       | —                                | —                                  | mic → Worker/Whisper → text         |
 

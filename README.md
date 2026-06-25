@@ -49,7 +49,7 @@ that turn the Cardputer into a hand-held Claude device:
 
 | Addition                         | Where                                                                                        | What it does                                                                                                                                                                                                                                                                                                       |
 | -------------------------------- | -------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| **Cardputer MCP (host bridge)**  | [`mcp/`](mcp/)                                                                               | Model Context Protocol server (`bleak`-based) that any Claude/MCP client can register, over **stdio or streamable-http**. Three tools: `notify`, `ask`, `confirm`. Talks BLE to the device app.                                                                                                                    |
+| **Cardputer MCP (host bridge)**  | [`mcp/`](mcp/)                                                                               | Model Context Protocol server (`bleak`-based) that any Claude/MCP client can register, over **stdio or streamable-http**. Six tools: `notify`, `ask`, `confirm`, `show`, `progress`, `device_status`. Talks BLE to the device app.                                                                                 |
 | **MCP tunnel + HTTP daemon**     | [`mcp/auth.py`](mcp/auth.py) + [`tunnel/`](tunnel/) + [`mac/`](mac/)                         | The cloud-bridge path. `CARDPUTER_HTTP=1` runs the same server as a bearer-authed streamable-http daemon (launchd); `tunnel/` (cloudflared + mcp-proxy) exposes it through an Anthropic [MCP tunnel] so Managed Agents / the Messages API can `notify`/`ask`/`confirm` on the device — outbound-only, fail-closed. |
 | **Cardputer MCP (device app)**   | [`buddy/device/apps/cardputer_mcp.py`](buddy/device/apps/cardputer_mcp.py)                   | BLE GATT peripheral on a fresh service UUID block (`a5cd0001-…`), distinct from Buddy's NUS. Renders notifications, ask-question modals, and a hold-Y confirmation gesture; sends acks via TX notifications.                                                                                                       |
 | **Cloudflare Worker relay**      | [`worker/`](worker/)                                                                         | Auth-gated edge endpoint. Whisper for STT, Claude Haiku 4.5 for the reply, Workers KV for per-device conversation memory (last 8 messages, 24 h TTL).                                                                                                                                                              |
@@ -113,7 +113,7 @@ Turn the Cardputer into a pocket pager that any MCP-speaking client
 — Claude Code, Claude Desktop, Cursor, Codex, Managed Agents (via the
 [MCP tunnel](#quick-start--cardputer-over-mcp-tunnels-cloud-agents)
 below), or anything that supports the Model Context Protocol — can
-reach. Three tools land on first connect:
+reach. Six tools land on first connect:
 
 - `cardputer.notify(title, body, urgency)` — flash a banner on the
   device and chirp the speaker. Urgency colors the header
@@ -143,8 +143,14 @@ reach. Three tools land on first connect:
   DND). Glance at your pocket to see what a long task is doing
   (`running pytest`, `wrote auth.py`, `idle`); each `channel` gets
   its own line so several agents can share the screen.
+- `cardputer.progress(label, percent, channel)` — draw a **live
+  progress bar** (0–100%) on the idle screen — the visual sibling of
+  `show`. Call it as a long task advances (`0 → 25 → 60 → 100`) and a
+  green bar fills on your pocket; it shares the `show` channel ring, so
+  a channel can flip between a status line and a bar. Silent, ambient,
+  ignores DND.
 - `cardputer.device_status()` — a **read-only** check of whether the
-  device is reachable and its state (`online; dnd=off; fw=0.4.1;
+  device is reachable and its state (`online; dnd=off; fw=0.4.2;
 caps=…; battery=87%`). Passive (no radio wake), so an agent can ask
   "is my human reachable / heads-down?" before deciding to interrupt,
   powered by a ~10 s device heartbeat.

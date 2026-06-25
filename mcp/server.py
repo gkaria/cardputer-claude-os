@@ -17,7 +17,7 @@ fail all in-flight RPCs cleanly so the client gets a real error
 rather than a hung tool.
 
 Why FastMCP rather than the low-level Server API: this server's tool
-surface is small (five tools at full build-out), each with a clean
+surface is small (six tools at full build-out), each with a clean
 typed signature. FastMCP's decorator style keeps the call-site code
 close to the description text, which is what we'll iterate on most
 often as we tune Claude's tool-selection behavior.
@@ -759,6 +759,60 @@ async def show(
 
 
 @mcp.tool()
+async def progress(
+    ctx: Context,
+    label: str,
+    percent: int,
+    channel: str = "",
+) -> str:
+    """Show a live progress bar (0–100%) on the user's Cardputer.
+
+    The visual sibling of `show`: non-blocking, silent, never takes over the
+    screen. Instead of a text line it draws a labeled bar that fills as the
+    `percent` you pass climbs, so the user can glance at their pocket and see
+    *how far along* a long task is — building, downloading, a test sweep, a
+    multi-step migration. Think progress indicator, not alert.
+
+    Call it repeatedly as the work advances (e.g. 0, 25, 60, 100). Each call
+    replaces the bar for the same `channel`, a short tag that defaults to your
+    agent label so several agents can each own a bar — the device keeps the
+    most recent few. `percent` is clamped to 0..100. Keep `label` short (~12
+    chars share the row with the bar; the LCD is 240×135). A `progress` and a
+    `show` on the same channel share one slot, latest wins — so you can flip a
+    channel from a status line to a bar and, at 100%, back to "done".
+
+    Because it's ambient it does NOT honor Do Not Disturb (nothing to disturb:
+    no sound, no takeover) and is NOT rate-limited — but update at a
+    human-readable cadence, not on every token.
+
+    Returns 'shown', 'unavailable: <reason>' if the device isn't connected, or
+    'failed: <reason>' (e.g. firmware older than 0.4.2 that lacks `progress`).
+    """
+    try:
+        pct = int(percent)
+    except (TypeError, ValueError):
+        return "error: percent must be an integer 0-100"
+    pct = 0 if pct < 0 else 100 if pct > 100 else pct
+    label = str(label)[:48]
+    agent = _agent_label(ctx)
+    # Channel defaults to the (unforgeable, token-derived) agent label so each
+    # agent owns its own bar without inventing a tag — mirrors `show`.
+    channel = (str(channel).strip() or agent)[:16]
+    result = await bridge.send(
+        "progress",
+        {"label": label, "percent": pct, "channel": channel},
+        rpc_timeout_s=5,
+        agent=agent,
+    )
+    if result.get("ok"):
+        return "shown"
+    err = result.get("err", "unknown")
+    if err.startswith("unavailable"):
+        return err
+    return f"failed: {err}"
+
+
+@mcp.tool()
 async def device_status() -> str:
     """Report whether the user's Cardputer is reachable and its current state.
 
@@ -769,7 +823,8 @@ async def device_status() -> str:
     Also handy to learn which tools the connected firmware supports (`caps`).
 
     Returns a one-line summary, e.g.
-      'online; dnd=off; fw=0.4.1; caps=notify,ask,confirm,confirm_details,show;
+      'online; dnd=off; fw=0.4.2;
+       caps=notify,ask,confirm,confirm_details,show,progress;
        uptime=142s; battery=87%; heartbeat 3s ago'
     or 'offline (device off, out of BLE range, or not yet connected this
     session)'.

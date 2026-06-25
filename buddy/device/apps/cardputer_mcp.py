@@ -59,13 +59,14 @@ _RX_CHAR = (RX_UUID, _FLAG_WRITE | _FLAG_WRITE_NR)
 _TX_CHAR = (TX_UUID, _FLAG_READ | _FLAG_NOTIFY)
 _SVC = (SERVICE_UUID, (_RX_CHAR, _TX_CHAR))
 
-_FW_VERSION = "0.4.1"
+_FW_VERSION = "0.4.2"
 # Capabilities advertised in `hello`. The host gates tool calls on these:
 #   confirm_details — confirm renders an agent-supplied scrollable action diff
 #   show            — ambient single-line status updates on the idle screen
+#   progress        — ambient channel rendered as a filling 0–100% bar
 # Old hosts ignore caps they don't use; new hosts skip the radio for caps a
 # device doesn't advertise. Keep in sync with /mcp/server.py.
-_CAPS = ["notify", "ask", "confirm", "confirm_details", "show"]
+_CAPS = ["notify", "ask", "confirm", "confirm_details", "show", "progress"]
 _MTU = 20  # default ATT MTU minus framing; chunk every TX write at this
 
 # How long the user must hold Y for `confirm` to succeed. Picked high
@@ -548,6 +549,8 @@ class App:
             self._cmd_confirm(msg, mid)
         elif cmd == "show":
             self._cmd_show(msg, mid)
+        elif cmd == "progress":
+            self._cmd_progress(msg, mid)
         elif cmd == "ping":
             self.ble.send({"ack": "ping", "id": mid, "ok": True})
         elif cmd == "cancel":
@@ -604,6 +607,34 @@ class App:
         if self.state == "idle":
             self._dirty = True
         self.ble.send({"ack": "show", "id": mid, "ok": True})
+
+    def _cmd_progress(self, msg, mid):
+        """Update one ambient channel as a live progress bar (0–100%).
+
+        The silent sibling of `show`: same channel ring, same etiquette (no
+        chirp, repaint only when idle is visible, DND-agnostic), but the entry
+        carries a `pct` so the idle screen renders it as a filling bar instead
+        of a text line. A `progress` and a `show` compete for the same channel
+        slot — the latest write wins, so a channel can flip from a status line
+        to a bar and back. `percent` is clamped to 0..100; a non-numeric value
+        is treated as 0 rather than crashing the BLE IRQ-adjacent parse path.
+        """
+        channel = (str(msg.get("channel", "")).strip() or "agent")[:16]
+        label = str(msg.get("label", ""))[:48]
+        try:
+            pct = int(msg.get("percent", 0))
+        except (TypeError, ValueError):
+            pct = 0
+        pct = 0 if pct < 0 else 100 if pct > 100 else pct
+        # Replace any existing entry for this channel, then push to front —
+        # identical bookkeeping to `_cmd_show` so the ring stays consistent.
+        self.ambient = [e for e in self.ambient if e["channel"] != channel]
+        self.ambient.insert(0, {"channel": channel, "text": label, "pct": pct})
+        if len(self.ambient) > _AMBIENT_MAX:
+            self.ambient = self.ambient[:_AMBIENT_MAX]
+        if self.state == "idle":
+            self._dirty = True
+        self.ble.send({"ack": "progress", "id": mid, "ok": True})
 
     def _cmd_ask(self, msg, mid):
         if self.dnd:
@@ -1045,22 +1076,50 @@ class App:
         _LCD.drawString(hint, (_W - _LCD.textWidth(hint)) // 2, _H - 14)
 
     def _draw_ambient(self, start_y):
-        """Render the ambient `show` lines (channel in orange, text in cream),
-        one per row from `start_y`. Caller has already cleared the area."""
+        """Render the ambient rows (channel in orange) one per row from
+        `start_y`. A `show` entry draws its text in cream; a `progress` entry
+        (one carrying `pct`) draws a filling bar instead. Caller has already
+        cleared the area."""
         _LCD.setTextSize(1)
         y = start_y
         for e in self.ambient[:_AMBIENT_MAX]:
             chan = (e.get("channel") or "agent")[:12]
             _LCD.setTextColor(_ORANGE, _BLACK)
             _LCD.drawString(chan, 6, y)
-            text_x = 6 + _LCD.textWidth(chan + " ")
-            # Trim text to the remaining char budget on the row so it doesn't
-            # run off the 240-px edge (the channel ate part of the width).
-            budget = _DETAIL_WRAP - len(chan) - 1
-            text = e.get("text", "")[:budget] if budget > 0 else ""
-            _LCD.setTextColor(_CREAM, _BLACK)
-            _LCD.drawString(text, text_x, y)
+            if "pct" in e:
+                self._draw_progress_row(e, chan, y)
+            else:
+                text_x = 6 + _LCD.textWidth(chan + " ")
+                # Trim text to the remaining char budget on the row so it
+                # doesn't run off the 240-px edge (the channel ate part of it).
+                budget = _DETAIL_WRAP - len(chan) - 1
+                text = e.get("text", "")[:budget] if budget > 0 else ""
+                _LCD.setTextColor(_CREAM, _BLACK)
+                _LCD.drawString(text, text_x, y)
             y += 14
+
+    def _draw_progress_row(self, e, chan, y):
+        """Render one ambient entry as a labeled progress bar: the channel tag
+        (already drawn by the caller at x=6), then a bordered bar filling green
+        in proportion to `pct`, with the percentage hard against the right
+        edge. The bar lives in the gap between a fixed left gutter and the
+        percentage so every row's bars line up regardless of tag width."""
+        pct = e.get("pct", 0)
+        pct_str = "%d%%" % pct
+        pct_w = _LCD.textWidth(pct_str)
+        _LCD.setTextColor(_CREAM, _BLACK)
+        _LCD.drawString(pct_str, _W - 6 - pct_w, y)
+        # Fixed left gutter (~8 chars) keeps the bars aligned column-wise even
+        # as channel tags vary in length; the bar fills to just left of "NN%".
+        bar_x = 6 + _LCD.textWidth("XXXXXXXX ")
+        bar_w = (_W - 6 - pct_w - 6) - bar_x
+        bar_h = 8
+        bar_y = y + 1
+        if bar_w > 8:
+            _LCD.drawRect(bar_x, bar_y, bar_w, bar_h, _GRAY_MID)
+            fill = (bar_w - 2) * pct // 100
+            if fill > 0:
+                _LCD.fillRect(bar_x + 1, bar_y + 1, fill, bar_h - 2, _GREEN)
 
     def _draw_notify(self):
         if not self.notify_data:

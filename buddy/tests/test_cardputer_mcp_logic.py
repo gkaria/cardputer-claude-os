@@ -257,6 +257,72 @@ def test_show_whitespace_channel_normalized_to_agent():
     assert app.ambient == [{"channel": "agent", "text": "y"}]
 
 
+# ---- App: ambient `progress` bar ----------------------------------------
+
+
+def test_progress_adds_pct_entry_and_acks():
+    app = _fresh_app()
+    sent = []
+    app.ble.send = lambda payload: sent.append(payload) or True
+    app._cmd_progress({"channel": "build", "label": "compiling", "percent": 42}, "p1")
+    assert app.ambient == [{"channel": "build", "text": "compiling", "pct": 42}]
+    assert sent == [{"ack": "progress", "id": "p1", "ok": True}]
+
+
+def test_progress_clamps_out_of_range():
+    app = _fresh_app()
+    app.ble.send = lambda payload: True
+    app._cmd_progress({"channel": "a", "label": "x", "percent": 250}, "1")
+    assert app.ambient[0]["pct"] == 100
+    app._cmd_progress({"channel": "b", "label": "y", "percent": -7}, "2")
+    assert app.ambient[0]["pct"] == 0
+
+
+def test_progress_non_numeric_percent_treated_as_zero():
+    app = _fresh_app()
+    app.ble.send = lambda payload: True
+    app._cmd_progress({"channel": "a", "label": "x", "percent": "bogus"}, "1")
+    assert app.ambient[0]["pct"] == 0
+
+
+def test_progress_shares_channel_ring_with_show():
+    """A progress write and a show write contend for the same channel slot;
+    the latest wins, flipping the entry between a bar and a text line."""
+    app = _fresh_app()
+    app.ble.send = lambda payload: True
+    app._cmd_show({"channel": "ci", "text": "running pytest"}, "1")
+    app._cmd_progress({"channel": "ci", "label": "tests", "percent": 30}, "2")
+    assert len(app.ambient) == 1
+    assert app.ambient[0] == {"channel": "ci", "text": "tests", "pct": 30}
+    # And back to a plain status line.
+    app._cmd_show({"channel": "ci", "text": "done"}, "3")
+    assert "pct" not in app.ambient[0]
+
+
+def test_progress_caps_channel_count():
+    app = _fresh_app()
+    app.ble.send = lambda payload: True
+    cap = _M["_AMBIENT_MAX"]
+    for i in range(cap + 3):
+        app._cmd_progress({"channel": "c%d" % i, "label": "t", "percent": i}, str(i))
+    assert len(app.ambient) == cap
+
+
+def test_progress_does_not_chirp():
+    app = _fresh_app()
+    app.ble.send = lambda payload: True
+    app._pending_chirp = None
+    app._cmd_progress({"channel": "x", "label": "y", "percent": 10}, "1")
+    assert app._pending_chirp is None  # ambient is silent
+
+
+def test_progress_whitespace_channel_normalized_to_agent():
+    app = _fresh_app()
+    app.ble.send = lambda payload: True
+    app._cmd_progress({"channel": "  ", "label": "y", "percent": 5}, "1")
+    assert app.ambient[0]["channel"] == "agent"
+
+
 # ---- App: confirm action diff + scrolling --------------------------------
 
 

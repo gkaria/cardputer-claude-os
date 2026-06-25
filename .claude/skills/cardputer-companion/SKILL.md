@@ -1,13 +1,13 @@
 ---
 name: cardputer-companion
-description: Use when the cardputer MCP tools (notify, ask, confirm, show) are available in the session, or the user mentions their Cardputer / handheld / "buzz me" / "page me". Governs runtime etiquette for the pocket device — mandates a physical confirm gesture before irreversible operations (passing the real action diff as details), buzzes the device on completion of long tasks, asks quick questions when blocked and the user is away from the keyboard, shows ambient status for long work, and formats all device output for the 240×135 LCD. This is the behavioral counterpart to the cardputer MCP server: the server is the hands, this skill is the manners. Trigger even when the user doesn't name the skill — if the `cardputer` MCP tools are registered, these rules are in force.
+description: Use when the cardputer MCP tools (notify, ask, confirm, show, progress) are available in the session, or the user mentions their Cardputer / handheld / "buzz me" / "page me". Governs runtime etiquette for the pocket device — mandates a physical confirm gesture before irreversible operations (passing the real action diff as details), buzzes the device on completion of long tasks, asks quick questions when blocked and the user is away from the keyboard, shows ambient status for long work, and formats all device output for the 240×135 LCD. This is the behavioral counterpart to the cardputer MCP server: the server is the hands, this skill is the manners. Trigger even when the user doesn't name the skill — if the `cardputer` MCP tools are registered, these rules are in force.
 ---
 
 # Cardputer Companion
 
 The Cardputer is a credit-card-sized handheld the user carries in their pocket.
-It exposes four MCP tools over a BLE bridge — `notify`, `ask`, `confirm`, and
-`show` — provided by the `cardputer` MCP server in this repo (`mcp/server.py`).
+It exposes MCP tools over a BLE bridge — `notify`, `ask`, `confirm`, `show`, and
+`progress` — provided by the `cardputer` MCP server in this repo (`mcp/server.py`).
 Those tools are the _hands_. This skill is the _manners_: it tells you **when**
 to reach for them and **how** to shape what you send, so the device stays
 useful instead of annoying.
@@ -104,6 +104,23 @@ heartbeat of a long task the user can glance at, _instead of_ buzzing them:
   chars. The device keeps only the most recent few channels.
 - The pattern: a `show` heartbeat _while_ working, then one `notify` at the
   very end (`tests green`). Don't replace the end-of-task `notify` with `show`.
+
+## 3c. Ambient progress — `progress`, when there's a percentage
+
+`cardputer.progress(label, percent, channel)` is the visual sibling of `show`:
+same silence, same channel ring, same etiquette — but it renders a **filling
+0–100% bar** instead of a text line. Reach for it _instead of_ `show` whenever
+the work has a real denominator: a build, a download, a test sweep, an N-of-M
+migration.
+
+- Call it as the work advances at a human cadence (`0 → 25 → 60 → 100`), not on
+  every increment. `percent` is clamped to 0–100; `label` shares the row with
+  the bar, so keep it ≤ ~12 chars (`build`, `tests`, `deploy`).
+- It shares the `show` ring, so a `progress` and a `show` on the same `channel`
+  contend for one slot — latest wins. A natural arc: `progress` to 100, then a
+  `show("done")` (or the end-of-task `notify`) to close it out.
+- Still ambient: silent, no takeover, ignores DND. Same rule as `show` — it is
+  NOT an alert. Pair the bar _while_ working with one `notify` at the very end.
 - `unavailable` / older firmware → just skip it; it's a nicety, never required.
 
 ## 4. Tiny-screen formatting
