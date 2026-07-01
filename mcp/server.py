@@ -39,6 +39,7 @@ from bleak import BleakClient, BleakScanner
 from bleak.exc import BleakError
 from mcp.server.fastmcp import Context, FastMCP
 
+from audit import ConsentAuditLog
 from auth import label_for_authorization
 from ratelimit import MinIntervalLimiter
 
@@ -462,6 +463,29 @@ def _notify_min_interval_s() -> float:
 # notifies and the blocking tools (ask/confirm) bypass it at the call site.
 _notify_limiter = MinIntervalLimiter(_notify_min_interval_s())
 
+
+def _audit_log_path() -> Optional[Path]:
+    """Resolve where `confirm` decisions are logged (see audit.py).
+
+    Defaults to ~/.cardputer-mcp/audit.log — a sibling of the pairing cache, so
+    the daemon's private state stays in one place. Set CARDPUTER_AUDIT_LOG to
+    an explicit path to relocate it, or to an empty string to disable the
+    consent trail entirely (some operators won't want any on-disk record).
+    """
+    raw = os.environ.get("CARDPUTER_AUDIT_LOG")
+    if raw is None:
+        return PAIR_CACHE_DIR / "audit.log"
+    raw = raw.strip()
+    return Path(raw).expanduser() if raw else None
+
+
+# Append-only JSONL trail of every `confirm` decision (agent, title, the
+# action-diff the user approved, outcome, hold duration). The honest,
+# non-cryptographic first rung of the signed-consent-receipts roadmap item:
+# it answers "what did an agent get me to approve, and when?" long after the
+# physical gesture is over. Best-effort — a log failure never breaks a confirm.
+_audit = ConsentAuditLog(_audit_log_path(), warn=_log)
+
 # Populated by build_http_app() in HTTP mode: maps bearer token -> agent
 # label. Read by _agent_label() so the device banner can show *which*
 # agent is asking. Empty in stdio mode (there's no HTTP request to read a
@@ -689,27 +713,45 @@ async def confirm(
     # scrollable action diff (capability `confirm_details`).
     if details.strip():
         payload["details"] = details
+    agent = _agent_label(ctx)
     result = await bridge.send(
         "confirm",
         payload,
         rpc_timeout_s=rpc_timeout,
-        agent=_agent_label(ctx),
+        agent=agent,
     )
 
+    # Classify the outcome once, then both return it to the caller and append
+    # it to the consent audit trail. Every branch — approved, denied, timed
+    # out, unreachable — is a decision worth recording; only the pre-send
+    # validation errors above (which never reached the device) are not.
     if result.get("ok") and result.get("confirmed"):
         # We surface the recorded hold duration to encourage tools
         # that want to log it — most callers will just check the
         # 'confirmed' prefix and move on.
         hold_ms = result.get("hold_ms", 0)
-        return f"confirmed (held {hold_ms} ms)"
-    if result.get("cancelled"):
-        return "cancelled"
-    if result.get("timed_out"):
-        return "timeout"
-    err = result.get("err", "unknown")
-    if err.startswith("unavailable"):
-        return err
-    return f"failed: {err}"
+        outcome, ret = "confirmed", f"confirmed (held {hold_ms} ms)"
+    elif result.get("cancelled"):
+        hold_ms, outcome, ret = None, "cancelled", "cancelled"
+    elif result.get("timed_out"):
+        hold_ms, outcome, ret = None, "timeout", "timeout"
+    else:
+        hold_ms = None
+        err = result.get("err", "unknown")
+        if err.startswith("unavailable"):
+            outcome, ret = "unavailable", err
+        else:
+            outcome, ret = "failed", f"failed: {err}"
+
+    _audit.record(
+        tool="confirm",
+        agent=agent,
+        title=title,
+        details=details if details.strip() else None,
+        outcome=outcome,
+        hold_ms=hold_ms,
+    )
+    return ret
 
 
 @mcp.tool()
