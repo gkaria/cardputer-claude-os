@@ -65,6 +65,10 @@ Rules:
   legibility of intent, not cryptographic proof — and the `title` must still
   stand on its own (older firmware shows the title only).
 - Do not call `confirm` for routine yes/no decisions — that's what `ask` is for.
+- Every `confirm` decision (confirmed / cancelled / timeout / unavailable) is
+  written to a local consent audit log (`~/.cardputer-mcp/audit.log`) with the
+  agent label, `title`, and `details`. Another reason to pass a real, legible
+  `details`: it's the durable record of _what_ the user approved.
 
 ## 2. Proactive notify — quiet
 
