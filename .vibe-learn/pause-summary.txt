@@ -1,0 +1,8 @@
+⏸ vibe-learn — what just happened:
+Goal: how to use claude buddy
+
+  ✦ Ran: ls /Users/gaurangkaria/Development/GitHubForks/cardputer-claude-os/ /Users/gaurangkaria/Development/GitHubForks/cardputer-claude-os/buddy/ 2>/dev/null
+  ✦ Ran: ls /Users/gaurangkaria/Development/GitHubForks/cardputer-claude-os/docs/ /Users/gaurangkaria/Development/GitHubForks/cardputer-claude-os/mcp/ 2>/dev/null && head -80 /Users/gaurangkaria/Development/Gi
+  ✦ Ran: head -60 /Users/gaurangkaria/Development/GitHubForks/cardputer-claude-os/buddy/device/apps/claude_buddy.py; ls /Users/gaurangkaria/Development/GitHubForks/cardputer-claude-os/buddy/references/
+
+ /learn [question]  ·  /digest  ·  vibe-learn briefing  ·  vibe-learn audio-prep
